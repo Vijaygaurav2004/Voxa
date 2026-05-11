@@ -1,0 +1,77 @@
+# Voxa Custom Skills
+# Define your own voice shortcuts here. These bypass the LLM for instant, zero-latency execution.
+#
+# Supported actions:
+#   open_app: "App Name"        → Open/activate an app
+#   close_app: "App Name"       → Quit an app
+#   open_url: "https://..."     → Open a URL in Chrome
+#   search: "query"             → Google search
+#   play_youtube: "query"       → Play on YouTube
+#   type_text: "text"           → Type text at cursor
+#   keystroke: "cmd+t"          → Send a keyboard shortcut
+#   shell: "command"            → Run a shell command
+#   wait: 1.5                   → Wait N seconds
+#   speak: "message"            → Say something
+#   screenshot: true            → Take a screenshot
+
+skills:
+  # ── Work Mode ────────────────────────────────────────────────────────────────
+  - name: "Work Mode"
+    trigger: "work mode"
+    description: "Switching to work mode"
+    actions:
+      - open_app: "Visual Studio Code"
+      - wait: 1
+      - open_app: "Google Chrome"
+      - wait: 1
+      - open_url: "https://github.com"
+
+  # ── Focus Mode ───────────────────────────────────────────────────────────────
+  - name: "Focus Mode"
+    trigger: "focus mode"
+    description: "Enabling focus mode — closing distractions"
+    actions:
+      - close_app: "Slack"
+      - close_app: "Discord"
+      - speak: "Focus mode enabled. Distractions closed."
+
+  # ── Morning Routine ──────────────────────────────────────────────────────────
+  - name: "Morning Routine"
+    trigger: "good morning"
+    description: "Starting your morning routine"
+    actions:
+      - open_url: "https://news.ycombinator.com"
+      - wait: 1
+      - play_youtube: "morning chill music playlist"
+
+  # ── Quick Google ─────────────────────────────────────────────────────────────
+  - name: "Quick Google"
+    trigger: "google *"
+    description: "Searching Google"
+    actions:
+      - open_app: "Google Chrome"
+      - wait: 0.5
+      - search: "quick search"
+
+  # ── Screenshot Desktop ───────────────────────────────────────────────────────
+  - name: "Screenshot"
+    trigger: "take screenshot"
+    description: "Taking a screenshot"
+    actions:
+      - screenshot: true
+
+  # ── Lock Screen ──────────────────────────────────────────────────────────────
+  - name: "Lock Screen"
+    trigger: "lock screen"
+    description: "Locking your screen"
+    actions:
+      - keystroke: "cmd+ctrl+q"
+
+  # ── Daily Standup ────────────────────────────────────────────────────────────
+  - name: "Daily Standup"
+    trigger: "start standup"
+    description: "Opening Slack for standup"
+    actions:
+      - open_app: "Slack"
+      - wait: 1
+      - speak: "Standup time! Don't forget to update your status."

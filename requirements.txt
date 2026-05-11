@@ -1,0 +1,32 @@
+# Voxa — Voice Operating Layer for macOS
+# Core dependencies
+
+# AI / LLM
+openai>=1.40.0
+pydantic>=2.5.0
+
+# Audio
+sounddevice>=0.4.6
+numpy>=1.24.0
+webrtcvad>=2.0.10
+
+# Environment
+python-dotenv>=1.0.0
+
+# Hotkey
+pynput>=1.7.6
+
+# Database
+# sqlite3 is built-in
+
+# TTS — uses macOS native `say` command (no dependency)
+
+# Custom Skills
+pyyaml>=6.0
+
+# Web Dashboard
+fastapi>=0.110.0
+uvicorn>=0.29.0
+
+# Local LLM fallback (Ollama)
+requests>=2.31.0

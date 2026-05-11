@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+voxa.log
+*.db
+venv/
+.venv/
+dist/
+build/
+*.egg-info/
