@@ -10,7 +10,7 @@ from typing import Optional, Callable, List, Dict
 from voxa.intelligence.intent_parser import Action, ActionType, ActionPlan
 from voxa.actions import app_control, browser, typing, filesystem, shell
 from voxa.actions import system_control, clipboard, timers, screen_reader, media_control, calendar, email as email_action
-from voxa.actions import computer_control, editor
+from voxa.actions import computer_control, editor, whatsapp
 from voxa.voice.tts import speak_confirmation
 from voxa.utils.logger import get_logger
 
@@ -289,6 +289,12 @@ def execute_action(action: Action) -> dict:
                 app=action.app,
                 mode=action.editor_mode or "chat",
             )
+
+        # ── Messaging ───────────────────────────────────────────────────
+        elif action_type == ActionType.SEND_WHATSAPP:
+            contact = action.contact_name or action.query or ""
+            msg     = action.text or ""
+            return whatsapp.send_whatsapp_message(contact, msg)
 
         else:
             log.error("Unknown action type: %s", action.action)

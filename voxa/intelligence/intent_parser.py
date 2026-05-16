@@ -75,6 +75,8 @@ class ActionType(str, Enum):
     FOCUS_APP = "focus_app"               # Bring a running app to the foreground
     # ── Editor AI ────────────────────────────────────────────────────────────────
     EDITOR_AI_PROMPT = "editor_ai_prompt"  # Send prompt to Copilot/Cursor/Windsurf AI
+    # ── Messaging ──────────────────────────────────────────────────────────
+    SEND_WHATSAPP = "send_whatsapp"        # Send WhatsApp message to a contact
 
 
 class Action(BaseModel):
@@ -121,6 +123,8 @@ class Action(BaseModel):
     # Editor AI
     editor_prompt: Optional[str] = None  # The prompt to send to the AI assistant
     editor_mode: Optional[str] = None    # "chat" | "inline" | "agent"
+    # Messaging
+    contact_name: Optional[str] = None  # Contact name for WhatsApp / iMessage
 
 
 class ActionPlan(BaseModel):
@@ -227,6 +231,11 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 |--------|----------------|-------------|
 | editor_ai_prompt | editor_prompt | Send a prompt to the AI in the active editor (VS Code Copilot / Cursor / Windsurf). Auto-detects which editor is open. Use app field to force a specific editor. |
 
+### Messaging
+| Action | Required Fields | Description |
+|--------|----------------|-------------|
+| send_whatsapp | contact_name, text | Send a WhatsApp message to a contact by name. Tries WhatsApp Desktop first, then WhatsApp Web. |
+
 ## Critical Rules
 1. **Mouse clicks by description** → use `vision_click` with element=natural language description like "the blue Send button" or "the search bar".
 2. **Any app** → use `open_app` with the app name as the user said it. Do NOT assume VS Code is installed; use the actual app name.
@@ -239,7 +248,8 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 9. **What's on screen** → `screen_read`. **Take screenshot** → `screenshot`.
 10. `confirmation` must be a friendly 1-sentence summary of what you're about to do.
 11. For complex tasks like "open Cursor and open a folder", break into: open_app → wait → ax_menu(File→Open) → type_text(path) → keystroke(return).
-12. **Coding AI prompts** → `editor_ai_prompt` with editor_prompt=the exact prompt text. If the user says "ask Copilot to...", "tell Cursor to...", "in VS Code write...", use this action. Set app to the editor name if specified, otherwise leave blank to auto-detect.
+12. **Coding AI prompts** → `editor_ai_prompt` with editor_prompt=the exact prompt text.
+13. **WhatsApp messages** → `send_whatsapp` with contact_name=the person's name and text=the message. Extract both from the command. e.g. "send hi to John on WhatsApp" → contact_name="John", text="hi".
 
 ## Examples
 "Turn volume up" → [{system_volume: direction="up"}]
@@ -252,6 +262,9 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 "Ask Copilot to write a function that reverses a string" → [{editor_ai_prompt: editor_prompt="write a function that reverses a string"}]
 "Tell Cursor to refactor this code to use async await" → [{editor_ai_prompt: app="Cursor", editor_prompt="refactor this code to use async await", editor_mode="chat"}]
 "Write a React component for a login form" → [{editor_ai_prompt: editor_prompt="write a React component for a login form"}]
+"Open WhatsApp and send hello to John" → [{send_whatsapp: contact_name="John", text="hello"}]
+"WhatsApp Priya saying I'll be late" → [{send_whatsapp: contact_name="Priya", text="I'll be late"}]
+"Send a WhatsApp message to Rahul: can we talk?" → [{send_whatsapp: contact_name="Rahul", text="can we talk?"}]
 
 ## Context
 Default browser: Google Chrome. OS: macOS.
