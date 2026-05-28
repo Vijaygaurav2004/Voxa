@@ -328,21 +328,13 @@ def open_url(url: str) -> dict:
 
 
 def navigate_to(url: str) -> dict:
-    """Navigate the current Chrome tab to a URL."""
-    safe = escape_applescript_string(url)
-    log.info("🧭 Navigating to: %s", url)
-    try:
-        _ensure_chrome_running()
-        run_applescript(f'''
-            tell application "{BROWSER}"
-                set URL of active tab of front window to "{safe}"
-            end tell
-        ''')
+    """Open a URL in a new Chrome tab (always opens a fresh tab)."""
+    log.info("🧭 Navigating to (new tab): %s", url)
+    if _open_tab(url):
         return {"success": True, "action": "browser_navigate", "url": url,
-                "message": "Navigated to {}".format(url)}
-    except AppleScriptError as e:
-        return {"success": False, "action": "browser_navigate", "url": url,
-                "error": str(e), "message": "Could not navigate to {}".format(url)}
+                "message": "Opened {} in a new tab".format(url)}
+    return {"success": False, "action": "browser_navigate", "url": url,
+            "message": "Could not open {}".format(url)}
 
 
 def search_google(query: str) -> dict:
@@ -366,6 +358,58 @@ def search_youtube(query: str) -> dict:
     return result
 
 
+def maps_search(destination: str) -> dict:
+    """
+    Open Google Maps in a new Chrome tab and search for a place or address.
+    Works for landmarks, cities, addresses, 'coffee shops near me', etc.
+    """
+    log.info("🗺️  Maps search: %s", destination)
+    encoded = urllib.parse.quote_plus(destination)
+    url = "https://www.google.com/maps/search/{}".format(encoded)
+    if _open_tab(url):
+        return {"success": True, "action": "maps_search", "destination": destination,
+                "message": "Opened Google Maps for '{}'".format(destination)}
+    return {"success": False, "action": "maps_search", "destination": destination,
+            "message": "Could not open Google Maps"}
+
+
+def maps_directions(origin: str, destination: str) -> dict:
+    """
+    Open Google Maps directions (with distance + ETA) in a new Chrome tab.
+    Use origin='my+location' to start from the user's current location.
+
+    The resulting Maps page shows:
+    - Distance in km / miles
+    - Estimated travel time by car, transit, and walking
+    """
+    log.info("📍 Maps directions: %s → %s", origin, destination)
+
+    # Normalise "my location" / "here" / "current location" to Maps keyword
+    _here_phrases = {"my location", "my+location", "here", "current location",
+                     "where i am", "my place", "current place"}
+    if origin.lower().strip() in _here_phrases:
+        origin_enc = "My+Location"
+    else:
+        origin_enc = urllib.parse.quote_plus(origin)
+
+    dest_enc = urllib.parse.quote_plus(destination)
+
+    # Google Maps Directions URL — opens with route + distance panel
+    url = "https://www.google.com/maps/dir/{}/{}".format(origin_enc, dest_enc)
+
+    if _open_tab(url):
+        return {
+            "success": True,
+            "action": "maps_directions",
+            "origin": origin,
+            "destination": destination,
+            "message": "Showing directions and distance from '{}' to '{}' on Google Maps".format(
+                origin, destination),
+        }
+    return {"success": False, "action": "maps_directions",
+            "message": "Could not open Google Maps directions"}
+
+
 def play_youtube(query: str) -> dict:
     """
     Search YouTube for a video and play the first result immediately.
@@ -379,10 +423,8 @@ def play_youtube(query: str) -> dict:
     # ── Strategy 1: Server-side URL lookup (best, no JS) ──────────────────────
     video_url = _fetch_youtube_video_url(query)
     if video_url:
-        _ensure_chrome_running()
-        result = navigate_to(video_url)
-        if result.get("success"):
-            log.info("✅ Navigated to YouTube video: %s", video_url)
+        if _open_tab(video_url):  # Always open in a new tab
+            log.info("✅ Opened YouTube video in new tab: %s", video_url)
             return {"success": True, "action": "play_youtube", "query": query,
                     "message": "Playing '{}' on YouTube".format(query)}
 

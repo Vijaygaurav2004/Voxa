@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import json
 import time
+# pyrefly: ignore [missing-import]
 from openai import OpenAI
+# pyrefly: ignore [missing-import]
 from pydantic import BaseModel
 from typing import Optional, List
 from enum import Enum
@@ -28,6 +30,8 @@ class ActionType(str, Enum):
     BROWSER_CLICK_FIRST_RESULT = "browser_click_first_result"
     PLAY_YOUTUBE = "play_youtube"         # Search YouTube AND auto-play first result
     SEARCH_NETFLIX = "search_netflix"     # Open Netflix and search for content
+    MAPS_SEARCH = "maps_search"           # Open Google Maps and search for a place
+    MAPS_DIRECTIONS = "maps_directions"   # Get directions/distance between two places
     TYPE_TEXT = "type_text"
     KEYSTROKE = "keystroke"
     SHELL_COMMAND = "shell_command"
@@ -125,6 +129,9 @@ class Action(BaseModel):
     editor_mode: Optional[str] = None    # "chat" | "inline" | "agent"
     # Messaging
     contact_name: Optional[str] = None  # Contact name for WhatsApp / iMessage
+    # Maps
+    origin: Optional[str] = None        # Starting location for directions
+    destination: Optional[str] = None   # Destination location for directions / maps search
 
 
 class ActionPlan(BaseModel):
@@ -157,6 +164,12 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 | browser_navigate | url | Navigate current tab to URL |
 | play_youtube | query | Search YouTube and play first result |
 | search_netflix | query | Search Netflix and open first result |
+
+### Maps
+| Action | Required Fields | Description |
+|--------|----------------|-------------|
+| maps_search | destination | Open Google Maps and search for a place, address, or landmark |
+| maps_directions | origin, destination | Get directions and distance between two places on Google Maps |
 
 ### Mouse & UI Control
 | Action | Required Fields | Description |
@@ -250,6 +263,7 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 11. For complex tasks like "open Cursor and open a folder", break into: open_app → wait → ax_menu(File→Open) → type_text(path) → keystroke(return).
 12. **Coding AI prompts** → `editor_ai_prompt` with editor_prompt=the exact prompt text.
 13. **WhatsApp messages** → `send_whatsapp` with contact_name=the person's name and text=the message. Extract both from the command. e.g. "send hi to John on WhatsApp" → contact_name="John", text="hi".
+14. **Maps / location** → any question about distance, directions, "how far", "navigate to", "show me on maps", "find [place]" → use `maps_directions` (with origin+destination) or `maps_search` (single place). Always open in Google Maps.
 
 ## Examples
 "Turn volume up" → [{system_volume: direction="up"}]
@@ -265,6 +279,11 @@ You control the user's Mac computer completely — mouse, keyboard, UI, apps, sy
 "Open WhatsApp and send hello to John" → [{send_whatsapp: contact_name="John", text="hello"}]
 "WhatsApp Priya saying I'll be late" → [{send_whatsapp: contact_name="Priya", text="I'll be late"}]
 "Send a WhatsApp message to Rahul: can we talk?" → [{send_whatsapp: contact_name="Rahul", text="can we talk?"}]
+"Show me the Eiffel Tower on maps" → [{maps_search: destination="Eiffel Tower"}]
+"How far is Delhi from Mumbai" → [{maps_directions: origin="Delhi", destination="Mumbai"}]
+"Distance from my location to JFK airport" → [{maps_directions: origin="my+location", destination="JFK airport"}]
+"Directions from Bangalore to Mysore" → [{maps_directions: origin="Bangalore", destination="Mysore"}]
+"Open maps and search for nearby coffee shops" → [{maps_search: destination="coffee shops near me"}]
 
 ## Context
 Default browser: Google Chrome. OS: macOS.
@@ -412,6 +431,9 @@ def is_simple_command(user_input: str) -> bool:
         "open ", "close ", "quit ", "launch ",
         "go to ", "navigate to ", "search for ",
         "play ", "pause", "stop",
+        "show me ", "find ", "where is ",
+        "how far ", "distance from ", "directions ", "directions from ",
+        "maps ", "open maps",
     ]
     lower = user_input.lower().strip()
     # If command matches a simple pattern and has no "and" / "then", it's simple

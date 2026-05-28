@@ -5,6 +5,7 @@ Verifies that natural language commands are correctly converted to action plans.
 
 import os
 import sys
+# pyrefly: ignore [missing-import]
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -93,3 +94,18 @@ class TestIntentParsing:
         plan = parse_intent("Open Chrome and play lo-fi music on YouTube")
         assert plan is not None
         assert plan.thought  # Should have reasoning
+
+    def test_maps_search(self):
+        plan = parse_intent("Show me the Eiffel Tower on maps")
+        assert plan is not None
+        assert any(a.action == ActionType.MAPS_SEARCH for a in plan.actions)
+
+    def test_maps_directions(self):
+        plan = parse_intent("Directions from Delhi to Mumbai")
+        assert plan is not None
+        assert any(a.action == ActionType.MAPS_DIRECTIONS for a in plan.actions)
+
+    def test_maps_distance_phrase(self):
+        plan = parse_intent("How far is Bangalore from Mysore")
+        assert plan is not None
+        assert any(a.action == ActionType.MAPS_DIRECTIONS for a in plan.actions)

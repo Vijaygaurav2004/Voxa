@@ -151,6 +151,13 @@ def execute_action(action: Action) -> dict:
             return browser.play_youtube(action.query or "")
         elif action_type == ActionType.SEARCH_NETFLIX:
             return browser.search_netflix(action.query or "")
+        elif action_type == ActionType.MAPS_SEARCH:
+            return browser.maps_search(action.destination or action.query or "")
+        elif action_type == ActionType.MAPS_DIRECTIONS:
+            return browser.maps_directions(
+                origin=action.origin or "My Location",
+                destination=action.destination or action.query or "",
+            )
 
         # ── Input ──────────────────────────────────────────────────────────────
         elif action_type == ActionType.TYPE_TEXT:
