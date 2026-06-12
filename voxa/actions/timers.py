@@ -99,6 +99,7 @@ def set_timer(
             "label": message,
             "duration_seconds": duration_seconds,
             "cancel_flag": cancel_flag,
+            "created_at": time.time(),
         }
 
     log.info("⏱️  Timer set: '%s' for %s", timer_name, duration_str)
@@ -132,7 +133,7 @@ def cancel_timer(name: Optional[str] = None) -> dict:
             return {"success": True, "action": "cancel_timer", "message": f"Timer '{name}' cancelled"}
 
         # Cancel most recently set timer
-        last_name = sorted(_timers.keys())[-1]
+        last_name = max(_timers.keys(), key=lambda k: _timers[k].get("created_at", 0))
         timer = _timers.pop(last_name)
         timer["cancel_flag"]["cancelled"] = True
         return {"success": True, "action": "cancel_timer", "message": f"Timer cancelled"}

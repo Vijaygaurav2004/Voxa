@@ -55,16 +55,8 @@ def _screen_size() -> tuple[int, int]:
 
 
 def _clic(x: int, y: int, button: str = "l", double: bool = False):
-    """Click at screen coordinates using osascript mouse events."""
-    click_type = "double" if double else "single"
-    btn_num = 1 if button == "l" else 2
-    script = f"""
-        tell application "System Events"
-            set p to {{x:{x}, y:{y}}}
-            click at {{x, y}}
-        end tell
-    """
-    # Use cliclick if available (more reliable), else AppleScript
+    """Click at screen coordinates using cliclick or AppleScript."""
+    # Use cliclick if available (more reliable than AppleScript for mouse)
     r = subprocess.run(["which", "cliclick"], capture_output=True, text=True)
     if r.returncode == 0:
         cmd = ["cliclick"]
@@ -76,10 +68,9 @@ def _clic(x: int, y: int, button: str = "l", double: bool = False):
             cmd += [f"c:{x},{y}"]
         subprocess.run(cmd, timeout=5)
     else:
-        # Pure AppleScript mouse click
-        btn_map = {"l": "1", "r": "2"}
-        b = btn_map.get(button, "1")
+        # Pure AppleScript mouse click — use correct coordinate syntax
         clicks = 2 if double else 1
+        btn_code = 2 if button == "r" else 1
         for _ in range(clicks):
             run_applescript(f"""
                 tell application "System Events"
@@ -169,16 +160,22 @@ def click_at(x: int, y: int, double: bool = False, right: bool = False) -> dict:
 
 def scroll(direction: str = "down", amount: int = 3) -> dict:
     """Scroll in the focused window."""
-    log.info("🖱️  Scroll %s x%d", direction, amount)
+    log.info("🔱️  Scroll %s x%d", direction, amount)
     delta = -amount if direction == "down" else amount
     try:
-        run_applescript(f"""
-            tell application "System Events"
-                scroll (get focused of every process) by {delta}
-            end tell
-        """, timeout=5)
+        # Try cliclick first (most reliable scroll wheel simulation)
+        r = subprocess.run(["which", "cliclick"], capture_output=True, text=True)
+        if r.returncode == 0:
+            subprocess.run(["cliclick", f"kp:arrow-{'down' if direction == 'down' else 'up'}"], timeout=5)
+        else:
+            # Fallback: use AppleScript scroll event
+            run_applescript(f"""
+                tell application "System Events"
+                    scroll (first process whose frontmost is true) by {delta}
+                end tell
+            """, timeout=5)
     except Exception:
-        # Fallback: key strokes
+        # Last resort: arrow keys
         key = "125" if direction == "down" else "126"  # down/up arrow keycodes
         for _ in range(amount * 3):
             run_applescript(f'tell application "System Events" to key code {key}', timeout=3)
@@ -329,11 +326,95 @@ def ax_type_in_field(app: str, field_hint: str, text: str, window_index: int = 1
 
 # ── Universal open + focus ────────────────────────────────────────────────────
 
+_APP_ALIASES_CC = {
+    "visual studio code": "Cursor",
+    "vscode": "Cursor",
+    "vs code": "Cursor",
+    "code": "Cursor",
+    "terminal": "Terminal",
+    "iterm": "iTerm",
+    "iterm2": "iTerm",
+    "chrome": "Google Chrome",
+    "firefox": "Firefox",
+    "safari": "Safari",
+    "word": "Microsoft Word",
+    "excel": "Microsoft Excel",
+    "powerpoint": "Microsoft PowerPoint",
+    "outlook": "Microsoft Outlook",
+    "slack": "Slack",
+    "discord": "Discord",
+    "zoom": "zoom.us",
+    "notes": "Notes",
+    "mail": "Mail",
+    "photos": "Photos",
+    "music": "Music",
+    "podcasts": "Podcasts",
+    "messages": "Messages",
+    "facetime": "FaceTime",
+    "keynote": "Keynote",
+    "pages": "Pages",
+    "numbers": "Numbers",
+    "xcode": "Xcode",
+    "system settings": "System Settings",
+    "system preferences": "System Settings",
+    "app store": "App Store",
+    "calculator": "Calculator",
+    "calendar": "Calendar",
+    "contacts": "Contacts",
+    "maps": "Maps",
+    "preview": "Preview",
+    "finder": "Finder",
+    "activity monitor": "Activity Monitor",
+    "font book": "Font Book",
+    "textedit": "TextEdit",
+    "stickies": "Stickies",
+    "voice memos": "Voice Memos",
+    "reminders": "Reminders",
+    "shortcuts": "Shortcuts",
+    "automator": "Automator",
+    "script editor": "Script Editor",
+    "console": "Console",
+    "disk utility": "Disk Utility",
+    "keychain access": "Keychain Access",
+    "migration assistant": "Migration Assistant",
+    "time machine": "Time Machine",
+    "boot camp assistant": "Boot Camp Assistant",
+}
+
+
+def _resolve_cc_app_name(app_name: str) -> str:
+    """Resolve app name aliases and strip generic suffixes like 'application', 'app'."""
+    cleaned = app_name.strip()
+
+    # Strip leading "the " (e.g. "the calendar app" → "calendar app")
+    if cleaned.lower().startswith("the "):
+        cleaned = cleaned[4:].strip()
+
+    # Strip trailing generic suffixes
+    for suffix in [" application", " app", " program", " software"]:
+        if cleaned.lower().endswith(suffix):
+            cleaned = cleaned[:-len(suffix)].strip()
+
+    # Look up alias (lowercase match)
+    resolved = _APP_ALIASES_CC.get(cleaned.lower())
+    if resolved:
+        return resolved
+
+    # Fallback: title-case the cleaned name (e.g. "google chrome" → "Google Chrome")
+    return " ".join(word.capitalize() for word in cleaned.split())
+
+
 def open_any_app(app_name: str) -> dict:
     """
     Open any macOS app dynamically.
+    Resolves aliases and strips generic suffixes before attempting open.
     Tries: AppleScript activate → open -a → Spotlight mdfind.
     """
+    resolved = _resolve_cc_app_name(app_name)
+    if resolved != app_name:
+        log.info("📌 Resolved app name '%s' → '%s'", app_name, resolved)
+    app_name = resolved
+
     log.info("🚀 Universal open: %s", app_name)
 
     # 1. Try AppleScript (fastest for known apps)
@@ -371,6 +452,10 @@ def open_any_app(app_name: str) -> dict:
 
 def focus_app(app_name: str) -> dict:
     """Bring an already-running app to the foreground."""
+    resolved = _resolve_cc_app_name(app_name)
+    if resolved != app_name:
+        log.info("📌 Resolved app name '%s' → '%s'", app_name, resolved)
+    app_name = resolved
     log.info("🎯 Focusing: %s", app_name)
     try:
         run_applescript(f'tell application "{app_name}" to activate', timeout=5)

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import time
 from typing import Optional, Callable, List, Dict
-from voxa.intelligence.intent_parser import Action, ActionType, ActionPlan
+from voxa.intelligence.intent_parser import Action, ActionType, ActionPlan, classify_action, SWIFT_ACTIONS
 from voxa.actions import app_control, browser, typing, filesystem, shell
 from voxa.actions import system_control, clipboard, timers, screen_reader, media_control, calendar, email as email_action
-from voxa.actions import computer_control, editor, whatsapp
+from voxa.actions import computer_control, editor, whatsapp, chrome as chrome_mod
 from voxa.voice.tts import speak_confirmation
 from voxa.utils.logger import get_logger
 
@@ -34,6 +34,11 @@ SPEAK_RESULT_ACTIONS = {
     ActionType.CALENDAR_UPCOMING,
     ActionType.REMINDERS_LIST,
     ActionType.MEDIA_NOW_PLAYING,
+    ActionType.CHROME_LIST_TABS,
+    ActionType.CHROME_PAGE_INFO,
+    ActionType.SEND_WHATSAPP,
+    ActionType.REPLY_WHATSAPP,
+    ActionType.EMAIL_COMPOSE,
 }
 
 
@@ -87,6 +92,61 @@ def execute_plan(plan: ActionPlan, on_step: Optional[Callable] = None) -> List[D
     success_count = sum(1 for r in results if r.get("success", False))
     log.info("✅ Plan complete: %d/%d steps succeeded", success_count, len(results))
 
+    return results
+
+
+def execute_python_only(plan: ActionPlan, on_step: Optional[Callable] = None) -> List[Dict]:
+    """
+    Execute only Python-classified actions in a plan.
+    Swift-classified actions are returned as {"routed": "swift", "skipped": True}.
+    Used by the API server when the Swift app handles native actions itself.
+
+    Args:
+        plan: The ActionPlan from the intent parser.
+        on_step: Optional callback(step_index, action, result) for status updates.
+
+    Returns:
+        List of result dicts — one per action, in order.
+    """
+    log.info("▶️  Executing Python-only plan: %s (%d steps)", plan.confirmation, len(plan.actions))
+    results = []
+
+    for i, action in enumerate(plan.actions):
+        target = classify_action(action.action)
+
+        if target == "swift":
+            result = {
+                "success": True,
+                "routed": "swift",
+                "skipped": True,
+                "action": action.action.value,
+                "message": f"Routed to Swift: {action.description}",
+            }
+            results.append(result)
+            log.info("⏭️  Step %d/%d: %s → Swift (skipped)", i + 1, len(plan.actions), action.action.value)
+        else:
+            log.info("━━ Step %d/%d: %s — %s",
+                     i + 1, len(plan.actions), action.action.value, action.description)
+            result = execute_action_with_retry(action)
+            results.append(result)
+
+            # Auto-speak results for query actions
+            if action.action in SPEAK_RESULT_ACTIONS and result.get("success") and result.get("message"):
+                log.info("🗣️  Speaking result for %s", action.action.value)
+                speak_confirmation(result["message"])
+
+        if on_step:
+            try:
+                on_step(i, action, result)
+            except Exception as e:
+                log.warning("Step callback error: %s", e)
+
+        if not result.get("success", False) and result.get("fatal", False):
+            log.error("⛔ Fatal error at step %d — aborting plan", i + 1)
+            break
+
+    success_count = sum(1 for r in results if r.get("success", False))
+    log.info("✅ Python-only plan complete: %d/%d steps succeeded", success_count, len(results))
     return results
 
 
@@ -302,6 +362,96 @@ def execute_action(action: Action) -> dict:
             contact = action.contact_name or action.query or ""
             msg     = action.text or ""
             return whatsapp.send_whatsapp_message(contact, msg)
+        elif action_type == ActionType.REPLY_WHATSAPP:
+            msg     = action.text or ""
+            contact = action.contact_name or None   # optional — switch chat first if given
+            return whatsapp.reply_whatsapp_message(msg, contact=contact)
+
+        # ── Chrome Tab & Window Control ──────────────────────────────────
+        elif action_type == ActionType.CHROME_NEW_TAB:
+            return chrome_mod.open_new_tab(action.url or "chrome://newtab")
+        elif action_type == ActionType.CHROME_NEW_TABS:
+            count = action.tab_count or 1
+            url   = action.url or "chrome://newtab"
+            return chrome_mod.open_n_tabs(count, url)
+        elif action_type == ActionType.CHROME_CLOSE_TAB:
+            return chrome_mod.close_current_tab()
+        elif action_type == ActionType.CHROME_CLOSE_ALL_TABS:
+            return chrome_mod.close_all_tabs()
+        elif action_type == ActionType.CHROME_CLOSE_TABS_RIGHT:
+            return chrome_mod.close_tabs_to_right()
+        elif action_type == ActionType.CHROME_NEXT_TAB:
+            return chrome_mod.switch_to_next_tab()
+        elif action_type == ActionType.CHROME_PREV_TAB:
+            return chrome_mod.switch_to_prev_tab()
+        elif action_type == ActionType.CHROME_SWITCH_TAB:
+            return chrome_mod.switch_to_tab(action.tab_index or 1)
+        elif action_type == ActionType.CHROME_FIND_TAB:
+            return chrome_mod.find_and_switch_tab(action.tab_keyword or action.query or "")
+        elif action_type == ActionType.CHROME_DUPLICATE_TAB:
+            return chrome_mod.duplicate_current_tab()
+        elif action_type == ActionType.CHROME_LIST_TABS:
+            return chrome_mod.list_open_tabs()
+        elif action_type == ActionType.CHROME_NEW_WINDOW:
+            return chrome_mod.open_new_window(action.url or "chrome://newtab")
+        elif action_type == ActionType.CHROME_INCOGNITO:
+            return chrome_mod.open_incognito_window(action.url or "")
+        elif action_type == ActionType.CHROME_CLOSE_WINDOW:
+            return chrome_mod.close_current_window()
+        elif action_type == ActionType.CHROME_BACK:
+            return chrome_mod.navigate_back()
+        elif action_type == ActionType.CHROME_FORWARD:
+            return chrome_mod.navigate_forward()
+        elif action_type == ActionType.CHROME_RELOAD:
+            return chrome_mod.reload_page(hard=False)
+        elif action_type == ActionType.CHROME_HARD_RELOAD:
+            return chrome_mod.reload_page(hard=True)
+        elif action_type == ActionType.CHROME_NAVIGATE:
+            return chrome_mod.navigate_to_url(action.url or "")
+        elif action_type == ActionType.CHROME_ZOOM_IN:
+            return chrome_mod.zoom_in()
+        elif action_type == ActionType.CHROME_ZOOM_OUT:
+            return chrome_mod.zoom_out()
+        elif action_type == ActionType.CHROME_ZOOM_RESET:
+            return chrome_mod.zoom_reset()
+        elif action_type == ActionType.CHROME_FIND_IN_PAGE:
+            return chrome_mod.find_in_page(action.query or "")
+        elif action_type == ActionType.CHROME_BOOKMARK:
+            return chrome_mod.bookmark_current_page()
+        elif action_type == ActionType.CHROME_HISTORY:
+            return chrome_mod.open_history()
+        elif action_type == ActionType.CHROME_DOWNLOADS:
+            return chrome_mod.open_downloads()
+        elif action_type == ActionType.CHROME_BOOKMARKS_MGR:
+            return chrome_mod.open_bookmarks()
+        elif action_type == ActionType.CHROME_SETTINGS:
+            return chrome_mod.open_settings()
+        elif action_type == ActionType.CHROME_EXTENSIONS:
+            return chrome_mod.open_extensions()
+        elif action_type == ActionType.CHROME_DEVTOOLS:
+            return chrome_mod.open_devtools()
+        elif action_type == ActionType.CHROME_PAGE_INFO:
+            return chrome_mod.get_page_info()
+        elif action_type == ActionType.CHROME_SCROLL:
+            direction = action.scroll_direction or action.direction or "down"
+            amount    = action.amount or 3
+            return chrome_mod.scroll_page(direction, amount)
+        elif action_type == ActionType.CHROME_REOPEN_TAB:
+            return chrome_mod.reopen_closed_tab()
+        elif action_type == ActionType.CHROME_CLOSE_TAB_BY_KEYWORD:
+            return chrome_mod.close_tab_by_keyword(action.tab_keyword or action.query or "")
+        elif action_type == ActionType.CHROME_CLOSE_OTHER_TABS:
+            return chrome_mod.close_other_tabs()
+        elif action_type == ActionType.CHROME_FULL_SCREEN:
+            return chrome_mod.toggle_full_screen()
+        elif action_type == ActionType.CHROME_BOOKMARK_BAR:
+            return chrome_mod.toggle_bookmark_bar()
+        elif action_type == ActionType.CHROME_BOOKMARK_ALL_TABS:
+            return chrome_mod.bookmark_all_tabs()
+        elif action_type == ActionType.CHROME_CLEAR_DATA:
+            return chrome_mod.clear_browsing_data()
+        elif action_type == ActionType.CHROME_PRINT:
+            return chrome_mod.print_page()
 
         else:
             log.error("Unknown action type: %s", action.action)

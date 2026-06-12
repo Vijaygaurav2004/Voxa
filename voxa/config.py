@@ -26,14 +26,14 @@ class Config:
     SAMPLE_RATE: int = int(os.getenv("SAMPLE_RATE", "16000"))
     CHANNELS: int = 1
     DTYPE: str = "int16"
-    SILENCE_THRESHOLD_MS: int = int(os.getenv("SILENCE_THRESHOLD_MS", "700"))
-    VAD_AGGRESSIVENESS: int = int(os.getenv("VAD_AGGRESSIVENESS", "2"))
+    SILENCE_THRESHOLD_MS: int = int(os.getenv("SILENCE_THRESHOLD_MS", "500"))
+    VAD_AGGRESSIVENESS: int = int(os.getenv("VAD_AGGRESSIVENESS", "3"))
     # Frame duration for VAD (must be 10, 20, or 30 ms)
     VAD_FRAME_DURATION_MS: int = 30
     # Maximum recording duration (seconds) to prevent infinite recordings
-    MAX_RECORDING_DURATION: float = 30.0
+    MAX_RECORDING_DURATION: float = 15.0
     # Minimum recording duration (seconds) to avoid noise triggers
-    MIN_RECORDING_DURATION: float = 0.5
+    MIN_RECORDING_DURATION: float = 0.3
 
     # --- Activation ---
     WAKE_WORD: str = os.getenv("WAKE_WORD", "hey voxa")
@@ -65,6 +65,10 @@ class Config:
     # --- Conversation Mode ---
     CONVERSATION_MODE: bool = os.getenv("CONVERSATION_MODE", "false").lower() == "true"
     FOLLOWUP_WINDOW_SECONDS: int = int(os.getenv("FOLLOWUP_WINDOW_SECONDS", "8"))
+
+    # --- API Server (Swift ↔ Python bridge) ---
+    API_SERVER_HOST: str = os.getenv("API_SERVER_HOST", "127.0.0.1")
+    API_SERVER_PORT: int = int(os.getenv("API_SERVER_PORT", "7430"))
 
     # --- Dashboard ---
     DASHBOARD_ENABLED: bool = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"

@@ -92,13 +92,6 @@ def set_brightness(level: int | None = None, direction: str | None = None) -> di
     log.info("☀️  Brightness control — level=%s, direction=%s", level, direction)
 
     try:
-        # Get current brightness via AppleScript
-        current_script = '''
-            tell application "System Preferences"
-                -- Use brightness slider value
-            end tell
-        '''
-        # Use brightness control via keyboard simulation (reliable cross-version)
         if direction:
             if direction.lower() == "up":
                 # F2 key = brightness up (key code 144)
@@ -112,30 +105,26 @@ def set_brightness(level: int | None = None, direction: str | None = None) -> di
                 return {"success": True, "action": "system_brightness", "message": "Brightness decreased"}
 
         if level is not None:
-            # Set via display brightness using osascript + coreaudiod approach
-            clamped = max(0.0, min(1.0, int(level) / 100.0))
-            script = f'''
-                tell application "System Events"
-                    tell process "Control Center"
-                        -- Fallback: use key simulation for approximate brightness
-                    end tell
-                end tell
-            '''
-            # Most reliable: use brightness CLI utility if available
+            clamped = max(0, min(100, int(level)))
+            # Try brightness CLI utility if available (most accurate)
             result = subprocess.run(
-                ["brightness", str(clamped)],
+                ["brightness", str(clamped / 100.0)],
                 capture_output=True, text=True, timeout=5
             )
             if result.returncode == 0:
-                return {"success": True, "action": "system_brightness", "message": f"Brightness set to {level}%"}
-            else:
-                # Fallback to key simulation
-                steps = int(clamped * 16)  # 16 brightness steps on macOS
-                for _ in range(16):  # First press all the way down
-                    run_applescript('tell application "System Events" to key code 145')
-                for _ in range(steps):  # Then press up to target
-                    run_applescript('tell application "System Events" to key code 144')
-                return {"success": True, "action": "system_brightness", "message": f"Brightness set to approximately {level}%"}
+                return {"success": True, "action": "system_brightness", "message": f"Brightness set to {clamped}%"}
+
+            # Fallback: press all the way down (16 steps), then press up to target level
+            # This is deterministic regardless of current brightness
+            steps_up = int(clamped / 100.0 * 16)  # 16 brightness steps on macOS
+            script = (
+                'tell application "System Events" to\n'
+                + '\n'.join(['key code 145'] * 16)  # Go all the way to 0
+                + '\n'
+                + '\n'.join(['key code 144'] * steps_up)  # Go up to target
+            )
+            run_applescript(script)
+            return {"success": True, "action": "system_brightness", "message": f"Brightness set to approximately {clamped}%"}
 
         return {"success": False, "action": "system_brightness", "message": "Specify level (0-100) or direction (up/down)"}
 
@@ -198,35 +187,62 @@ def toggle_dnd(enable: bool | None = None) -> dict:
     log.info("🔕 Do Not Disturb control — enable=%s", enable)
 
     try:
-        # macOS 12+ uses Focus mode; toggle via Control Center keyboard shortcut
-        # Most reliable across macOS versions: toggle via NSUserDefaults or shortcut
+        # macOS 12+: Focus mode stored in com.apple.controlcenter
+        # Most reliable cross-version approach: toggle via menu bar Control Center
         if enable is True:
+            # Try to enable Focus/DND via defaults + killall
             script = '''
-                tell application "System Events"
-                    -- Use Focus mode toggle shortcut or set via defaults
-                    do shell script "shortcuts run 'Enable DND' 2>/dev/null || true"
-                end tell
+                do shell script "defaults -currentHost write com.apple.notificationcenterui doNotDisturb -boolean true"
+                do shell script "killall -HUP usernoted 2>/dev/null || true"
             '''
+            run_applescript(script)
+            # Also try Shortcuts if user has set one up
+            subprocess.run(
+                ["shortcuts", "run", "Enable DND"],
+                capture_output=True, timeout=5
+            )
         elif enable is False:
             script = '''
-                tell application "System Events"
-                    do shell script "shortcuts run 'Disable DND' 2>/dev/null || true"
-                end tell
+                do shell script "defaults -currentHost write com.apple.notificationcenterui doNotDisturb -boolean false"
+                do shell script "killall -HUP usernoted 2>/dev/null || true"
             '''
+            run_applescript(script)
+            subprocess.run(
+                ["shortcuts", "run", "Disable DND"],
+                capture_output=True, timeout=5
+            )
         else:
-            script = '''
-                tell application "System Events"
-                    do shell script "shortcuts run 'Toggle DND' 2>/dev/null || true"
-                end tell
-            '''
+            # Toggle: read current state then flip it
+            try:
+                result = subprocess.run(
+                    ["defaults", "-currentHost", "read",
+                     "com.apple.notificationcenterui", "doNotDisturb"],
+                    capture_output=True, text=True, timeout=5
+                )
+                current = result.stdout.strip() == "1"
+                new_state = "false" if current else "true"
+                script = f'''
+                    do shell script "defaults -currentHost write com.apple.notificationcenterui doNotDisturb -boolean {new_state}"
+                    do shell script "killall -HUP usernoted 2>/dev/null || true"
+                '''
+                run_applescript(script)
+                subprocess.run(
+                    ["shortcuts", "run", "Toggle DND"],
+                    capture_output=True, timeout=5
+                )
+            except Exception:
+                # Fallback: just run Toggle DND shortcut
+                subprocess.run(
+                    ["shortcuts", "run", "Toggle DND"],
+                    capture_output=True, timeout=5
+                )
 
-        run_applescript(script)
         action = "enabled" if enable is True else ("disabled" if enable is False else "toggled")
         return {"success": True, "action": "system_dnd", "message": f"Do Not Disturb {action}"}
 
     except AppleScriptError as e:
         log.error("DND toggle failed: %s", e)
-        return {"success": False, "action": "system_dnd", "error": str(e), "message": "Failed to toggle Do Not Disturb — you may need to set up a Shortcut named 'Toggle DND'"}
+        return {"success": False, "action": "system_dnd", "error": str(e), "message": "Failed to toggle Do Not Disturb"}
 
 
 # ── System Info ────────────────────────────────────────────────────────────────
