@@ -40,6 +40,30 @@ EL_MODEL    = os.environ.get("ELEVENLABS_MODEL",    "eleven_turbo_v2_5")
 _current_proc: Optional[subprocess.Popen] = None
 _proc_lock = threading.Lock()
 
+_active_count = 0
+_count_lock = threading.Lock()
+
+def _increment_active():
+    global _active_count
+    with _count_lock:
+        _active_count += 1
+
+def _decrement_active():
+    global _active_count
+    with _count_lock:
+        _active_count = max(0, _active_count - 1)
+
+def is_speaking() -> bool:
+    """Return True if TTS is currently generating or speaking audio."""
+    global _active_count, _current_proc
+    with _count_lock:
+        if _active_count > 0:
+            return True
+    with _proc_lock:
+        if _current_proc and _current_proc.poll() is None:
+            return True
+    return False
+
 _on_speaking_start: Optional[Callable] = None
 _on_speaking_end:   Optional[Callable] = None
 
@@ -107,6 +131,7 @@ def speak(text: str, blocking: bool = True):
     log.info("🔊 Speaking: \"%s\"", text[:100])
 
     def _run():
+        _increment_active()
         if _on_speaking_start:
             _on_speaking_start()
         try:
@@ -115,6 +140,7 @@ def speak(text: str, blocking: bool = True):
             time.sleep(0.6)
             if _on_speaking_end:
                 _on_speaking_end()
+            _decrement_active()
 
     if blocking:
         _run()
@@ -126,6 +152,7 @@ def speak_confirmation(text: str):
     """Non-blocking speak — mutes wake listener before spawning thread."""
     if not text:
         return
+    _increment_active()
     if _on_speaking_start:
         _on_speaking_start()
 
@@ -136,6 +163,7 @@ def speak_confirmation(text: str):
             time.sleep(0.6)
             if _on_speaking_end:
                 _on_speaking_end()
+            _decrement_active()
 
     threading.Thread(target=_run, daemon=True, name="tts-confirm").start()
 
@@ -210,14 +238,18 @@ def _speak_openai(client, text: str):
         )
         response.stream_to_file(tmp_path)
 
+        proc = subprocess.Popen(
+            ["afplay", tmp_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         with _proc_lock:
-            _current_proc = subprocess.Popen(
-                ["afplay", tmp_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        _current_proc.wait()
+            _current_proc = proc
+        proc.wait()  # Use local ref to avoid NoneType if stop_speaking() clears _current_proc
     finally:
+        with _proc_lock:
+            if _current_proc is not None and _current_proc.poll() is not None:
+                _current_proc = None
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -245,14 +277,18 @@ def _speak_elevenlabs(client, text: str):
     try:
         os.write(fd, audio_data)
         os.close(fd)
+        proc = subprocess.Popen(
+            ["afplay", tmp_path],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         with _proc_lock:
-            _current_proc = subprocess.Popen(
-                ["afplay", tmp_path],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        _current_proc.wait()
+            _current_proc = proc
+        proc.wait()  # Use local ref to avoid NoneType crash
     finally:
+        with _proc_lock:
+            if _current_proc is not None and _current_proc.poll() is not None:
+                _current_proc = None
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -262,10 +298,11 @@ def _speak_elevenlabs(client, text: str):
 def _speak_macos(text: str):
     """Speak using macOS `say` — fallback only."""
     global _current_proc
+    proc = subprocess.Popen(
+        ["/usr/bin/say", "-v", MACOS_VOICE, "-r", str(MACOS_RATE), text],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
     with _proc_lock:
-        _current_proc = subprocess.Popen(
-            ["/usr/bin/say", "-v", MACOS_VOICE, "-r", str(MACOS_RATE), text],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    _current_proc.wait()
+        _current_proc = proc
+    proc.wait()  # Use local ref to avoid NoneType crash

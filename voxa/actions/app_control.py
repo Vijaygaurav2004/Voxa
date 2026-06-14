@@ -42,7 +42,15 @@ APP_ALIASES = {
 
 def _resolve_app_name(app_name: str) -> str:
     """Resolve common app name aliases to the actual macOS app name."""
-    return APP_ALIASES.get(app_name.lower().strip(), app_name)
+    cleaned = app_name.strip()
+    for suffix in [" application", " app", " program", " software"]:
+        if cleaned.lower().endswith(suffix):
+            cleaned = cleaned[:-len(suffix)].strip()
+
+    resolved = APP_ALIASES.get(cleaned.lower(), cleaned)
+    if resolved == cleaned and cleaned:
+        resolved = cleaned[0].upper() + cleaned[1:]
+    return resolved
 
 
 def open_app(app_name: str) -> dict:
@@ -57,6 +65,16 @@ def open_app(app_name: str) -> dict:
     app_name = resolved
 
     safe_name = escape_applescript_string(app_name)
+
+    # Check if application is already running
+    if is_app_running(app_name):
+        log.info("ℹ️ App %s is already running. Activating it.", app_name)
+        try:
+            run_applescript(f'tell application "{safe_name}" to activate')
+        except AppleScriptError:
+            pass
+        return {"success": True, "action": "open_app", "app": app_name, "message": f"{app_name} is already open"}
+
     log.info("🚀 Opening app: %s", app_name)
 
     try:
@@ -91,31 +109,94 @@ def open_app(app_name: str) -> dict:
 
 def close_app(app_name: str) -> dict:
     """Quit a macOS application by name."""
+    resolved = _resolve_app_name(app_name)
+    if resolved != app_name:
+        log.info("📌 Resolved '%s' → '%s'", app_name, resolved)
+    app_name = resolved
+
+    if not is_app_running(app_name):
+        return {
+            "success": True,
+            "action": "close_app",
+            "app": app_name,
+            "message": f"{app_name} is already closed",
+        }
+
     safe_name = escape_applescript_string(app_name)
     log.info("❌ Closing app: %s", app_name)
 
+    # 1. Try AppleScript quit
     try:
         run_applescript(f'tell application "{safe_name}" to quit')
+        # Wait a moment to see if it closed
+        for _ in range(10):
+            time.sleep(0.1)
+            if not is_app_running(app_name):
+                return {
+                    "success": True,
+                    "action": "close_app",
+                    "app": app_name,
+                    "message": f"Closed {app_name}",
+                }
+    except AppleScriptError as e:
+        log.warning("AppleScript quit failed for %s: %s", app_name, e)
+
+    # 2. Try shell command killall
+    import subprocess
+    log.info("⚡ AppleScript close failed or timed out — trying killall '%s'", app_name)
+    try:
+        result = subprocess.run(
+            ["killall", app_name],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "action": "close_app",
+                "app": app_name,
+                "message": f"Closed {app_name} via killall",
+            }
+    except Exception as e:
+        log.error("killall failed for %s: %s", app_name, e)
+
+    # 3. Try killall -9
+    log.info("⚡ Trying killall -9 '%s'", app_name)
+    try:
+        result = subprocess.run(
+            ["killall", "-9", app_name],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return {
+                "success": True,
+                "action": "close_app",
+                "app": app_name,
+                "message": f"Force closed {app_name}",
+            }
+    except Exception as e:
+        log.error("killall -9 failed for %s: %s", app_name, e)
+
+    # Check one last time
+    if not is_app_running(app_name):
         return {
             "success": True,
             "action": "close_app",
             "app": app_name,
             "message": f"Closed {app_name}",
         }
-    except AppleScriptError as e:
-        log.error("Failed to close %s: %s", app_name, e)
-        return {
-            "success": False,
-            "action": "close_app",
-            "app": app_name,
-            "error": str(e),
-            "message": f"Could not close {app_name}",
-        }
+
+    return {
+        "success": False,
+        "action": "close_app",
+        "app": app_name,
+        "message": f"Could not close {app_name}",
+    }
 
 
 def is_app_running(app_name: str) -> bool:
     """Check if an application is currently running."""
-    safe_name = escape_applescript_string(app_name)
+    resolved = _resolve_app_name(app_name)
+    safe_name = escape_applescript_string(resolved)
     try:
         result = run_applescript(f'''
             tell application "System Events"

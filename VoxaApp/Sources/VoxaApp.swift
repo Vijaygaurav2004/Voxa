@@ -1,0 +1,115 @@
+import SwiftUI
+import AppKit
+
+// MARK: - Floating Orb Panel (NSPanel)
+
+/// A frameless, always-on-top panel that hosts the Siri-style orb overlay.
+/// Uses NSPanel so it floats above other app windows and appears on all Spaces.
+final class VoxaOrbPanel: NSPanel {
+    init(state: VoxaState) {
+        super.init(
+            contentRect: .init(x: 0, y: 0, width: 260, height: 280),
+            styleMask: [.nonactivatingPanel, .borderless, .hudWindow],
+            backing: .buffered,
+            defer: false
+        )
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = false            // SwiftUI view draws its own shadow
+        isFloatingPanel = true
+        level = .floating
+        collectionBehavior = [.canJoinAllSpaces, .stationary]
+        isMovableByWindowBackground = true
+
+        let host = NSHostingView(
+            rootView: OverlayView()
+                .environmentObject(state)
+        )
+        host.frame = contentView?.bounds ?? .zero
+        host.autoresizingMask = [.width, .height]
+        contentView = host
+
+        // Centre-right position (matches default Siri placement style)
+        if let screen = NSScreen.main {
+            let x = screen.visibleFrame.maxX - 300
+            let y = screen.visibleFrame.midY - 140
+            setFrameOrigin(NSPoint(x: x, y: y))
+        }
+    }
+}
+
+// MARK: - App Delegate
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    var orbPanel: VoxaOrbPanel?
+    private var stateObserver: Any?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let state = VoxaState.shared
+        orbPanel = VoxaOrbPanel(state: state)
+
+        // Show/hide the floating panel synchronously on the main queue.
+        // We use DispatchQueue.main.async (not Task) so orderFront fires on
+        // the very next runloop tick — no async scheduling overhead.
+        stateObserver = NotificationCenter.default.addObserver(
+            forName: .voxaStateChanged,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // NotificationCenter guarantees delivery on .main queue.
+            // MainActor.assumeIsolated satisfies the compiler without async overhead.
+            MainActor.assumeIsolated {
+                guard let self, let panel = self.orbPanel else { return }
+                if state.isOverlayVisible {
+                    // Instant — same runloop tick
+                    panel.orderFront(nil)
+                } else {
+                    // Brief hold so fade-out SwiftUI animation can play
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                        guard self != nil, !state.isOverlayVisible else { return }
+                        panel.orderOut(nil)
+                    }
+                }
+            }
+        }
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        VoxaEngine.shared.stop()
+    }
+}
+
+// MARK: - Notification name
+
+extension Notification.Name {
+    static let voxaStateChanged = Notification.Name("voxaStateChanged")
+}
+
+// MARK: - Main App
+
+/// Main Voxa macOS menu bar application.
+@main
+struct VoxaApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var engine = VoxaEngine.shared
+    @StateObject private var state = VoxaState.shared
+
+    var body: some Scene {
+        // Menu bar extra — no Dock icon, just a menu bar presence
+        MenuBarExtra {
+            MenuBarView()
+                .environmentObject(engine)
+                .environmentObject(state)
+        } label: {
+            Label {
+                Text("Voxa")
+            } icon: {
+                Image(systemName: state.menuBarIcon)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(state.pipelineState == .listening ? .cyan : .primary)
+            }
+        }
+        .menuBarExtraStyle(.window)
+    }
+}

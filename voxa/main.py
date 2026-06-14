@@ -309,7 +309,6 @@ class Voxa:
         print("\n🧠 Parsing intent...")
 
         context_str = self.context.get_context_for_llm()
-        use_fast = is_simple_command(user_input)
         plan = parse_intent_with_retry(user_input, context=context_str)
 
         if not plan:
@@ -663,6 +662,19 @@ class Voxa:
 
 def main():
     """Entry point for Voxa."""
+    if "--server" in sys.argv:
+        # ── Headless API server mode (Swift ↔ Python bridge) ────────────────
+        print(BANNER)
+        print("  \033[1m🖥️  Mode: API Server\033[0m (headless)")
+        print(f"  🌐 Endpoint: http://{config.API_SERVER_HOST}:{config.API_SERVER_PORT}")
+        print(f"  📡 WebSocket: ws://{config.API_SERVER_HOST}:{config.API_SERVER_PORT}/ws/status")
+        print("  🛑 Press \033[1mCtrl+C\033[0m to quit")
+        print("=" * 55 + "\n")
+
+        from voxa.server import start_api_server
+        start_api_server(background=False)
+        return
+
     text_only = "--text" in sys.argv
     voxa = Voxa(
         enable_overlay=("--no-overlay" not in sys.argv) and not text_only,

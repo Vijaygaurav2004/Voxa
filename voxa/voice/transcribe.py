@@ -85,6 +85,5 @@ def transcribe_with_retry(audio_bytes: bytes, max_retries: int = 2) -> str | Non
             wait = 1.0 * (attempt + 1)
             log.warning("Retrying transcription in %.1fs (attempt %d/%d)",
                        wait, attempt + 1, max_retries)
-            import time as t
-            t.sleep(wait)
+            time.sleep(wait)
     return None

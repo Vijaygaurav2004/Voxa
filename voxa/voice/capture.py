@@ -264,6 +264,12 @@ class VoiceCapture:
                     if self.capture_rate != self.vad_rate:
                         arr = np.frombuffer(frame_bytes, dtype=np.int16)
                         arr_resampled = resample_audio(arr, self.capture_rate, self.vad_rate)
+                        # Ensure exact VAD frame size (webrtcvad requires exactly N samples)
+                        vad_frame_samples = int(self.vad_rate * self.frame_duration_ms / 1000)
+                        if len(arr_resampled) > vad_frame_samples:
+                            arr_resampled = arr_resampled[:vad_frame_samples]
+                        elif len(arr_resampled) < vad_frame_samples:
+                            arr_resampled = np.pad(arr_resampled, (0, vad_frame_samples - len(arr_resampled)))
                         vad_frame_bytes = arr_resampled.tobytes()
 
                     try:

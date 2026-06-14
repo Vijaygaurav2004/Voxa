@@ -84,19 +84,17 @@ class SkillManager:
 
         return None
 
-    def execute_skill(self, skill: dict) -> list[dict]:
+    def get_skill_plan(self, skill: dict) -> Optional["ActionPlan"]:
         """
-        Execute a matched skill's action list.
-        Actions are converted to Voxa ActionPlan format and dispatched.
+        Convert a matched skill's action list to a Voxa ActionPlan.
 
         Args:
             skill: The skill dict from skills.yaml.
 
         Returns:
-            List of result dicts from each action.
+            The parsed ActionPlan, or None if no valid actions found.
         """
-        from voxa.intelligence.intent_parser import Action, ActionType, ActionPlan
-        from voxa.actions.dispatcher import execute_plan
+        from voxa.intelligence.intent_parser import ActionPlan
 
         raw_actions = skill.get("actions", [])
         parsed_actions = []
@@ -110,13 +108,31 @@ class SkillManager:
                 log.error("Failed to parse skill action %s: %s", raw, e)
 
         if not parsed_actions:
-            return [{"success": False, "message": f"Skill '{skill.get('name')}' has no valid actions"}]
+            return None
 
-        plan = ActionPlan(
+        return ActionPlan(
             thought=f"Executing custom skill: {skill.get('name')}",
             actions=parsed_actions,
             confirmation=skill.get("description", f"Running {skill.get('name')}"),
         )
+
+    def execute_skill(self, skill: dict) -> list[dict]:
+        """
+        Execute a matched skill's action list.
+        Actions are converted to Voxa ActionPlan format and dispatched.
+
+        Args:
+            skill: The skill dict from skills.yaml.
+
+        Returns:
+            List of result dicts from each action.
+        """
+        from voxa.actions.dispatcher import execute_plan
+
+        plan = self.get_skill_plan(skill)
+        if not plan:
+            return [{"success": False, "message": f"Skill '{skill.get('name')}' has no valid actions"}]
+
         return execute_plan(plan)
 
     @property

@@ -36,12 +36,15 @@ WAKE_WORD_VARIANTS = [
 
 # Minimum RMS energy (0–32767 scale) to bother sending audio to Whisper.
 # Filters out near-silent ambient noise that VAD sometimes passes through.
-# Raised to 400 to avoid picking up TTS echo/reverb from speakers.
-MIN_RMS_ENERGY = 400
+# Raised to 600 to reduce false positives from TTS echo/reverb and background noise.
+MIN_RMS_ENERGY = 600
 
 # How long to wait after TTS finishes before listening again (seconds).
 # Prevents wake listener from hearing Voxa's own voice echo.
 POST_TTS_SETTLE_SECS = 1.2
+
+# Debounce: minimum seconds between wake word triggers (prevent double-fire)
+WAKE_DEBOUNCE_SECS = 3.0
 
 
 def _normalize(text: str) -> str:
@@ -67,10 +70,11 @@ def _matches_wake_word(text: str, wake_word: str) -> bool:
     if wake_norm in norm:
         return True
 
-    # All known variants
-    for variant in WAKE_WORD_VARIANTS:
-        if _normalize(variant) in norm:
-            return True
+    # Only check variants if we are using the default "hey voxa" wake word
+    if wake_norm == "hey voxa":
+        for variant in WAKE_WORD_VARIANTS:
+            if _normalize(variant) in norm:
+                return True
 
     return False
 
@@ -97,18 +101,25 @@ def _extract_command_after_wake(text: str, wake_word: str) -> Optional[str]:
     Returns None if only the wake word was said.
     """
     norm_text = _normalize(text)
+    wake_norm = _normalize(wake_word)
 
-    # Try each variant to find where it ends in the normalized text
-    for variant in [_normalize(wake_word)] + [_normalize(v) for v in WAKE_WORD_VARIANTS]:
-        idx = norm_text.find(variant)
-        if idx != -1:
-            # Get the position in the original text (approx)
-            after_norm = norm_text[idx + len(variant):].strip()
-            if len(after_norm) > 3:
-                # Reconstruct from original text after the wake word position
-                # Use the normalized remainder as the command
-                return after_norm
-            return None
+    # Try matching the actual wake word first
+    idx = norm_text.find(wake_norm)
+    if idx != -1:
+        after_norm = norm_text[idx + len(wake_norm):].strip()
+        if len(after_norm) > 3:
+            return after_norm
+        return None
+
+    # Fall back to variants only if using default "hey voxa"
+    if wake_norm == "hey voxa":
+        for variant in WAKE_WORD_VARIANTS:
+            idx = norm_text.find(_normalize(variant))
+            if idx != -1:
+                after_norm = norm_text[idx + len(_normalize(variant)) :].strip()
+                if len(after_norm) > 3:
+                    return after_norm
+                return None
 
     return None
 
@@ -147,6 +158,7 @@ class WakeWordListener:
         self._paused.set()   # Start as active (not paused)
         self._paused_at: Optional[float] = None   # timestamp of last pause()
         self._command_lock = threading.Lock()
+        self._last_wake_time: float = 0.0  # debounce: track last successful wake
 
     def start(self):
         """Start background wake word detection."""
@@ -175,10 +187,18 @@ class WakeWordListener:
 
     def resume(self):
         """Resume detection after a command finishes. Includes a settle delay."""
-        # Short delay so mic doesn't pick up TTS room reverb or echo
-        time.sleep(POST_TTS_SETTLE_SECS)
-        self._paused_at = None
-        self._paused.set()
+        def _wait_and_resume():
+            from voxa.voice import tts
+            # Wait while TTS is generating or speaking
+            while tts.is_speaking():
+                time.sleep(0.1)
+            # Settle delay so mic doesn't pick up TTS room reverb or echo
+            time.sleep(POST_TTS_SETTLE_SECS)
+            self._paused_at = None
+            self._paused.set()
+            log.debug("Wake word listener resumed")
+
+        threading.Thread(target=_wait_and_resume, daemon=True, name="wake-resume").start()
 
     # Maximum seconds the listener can stay paused before auto-resuming.
     # Prevents permanent freeze if command handler throws an exception.
@@ -226,6 +246,12 @@ class WakeWordListener:
 
                 # ── Fuzzy punctuation-normalized match ──
                 if _matches_wake_word(text, self.wake_word):
+                    # Debounce: ignore if we just fired within WAKE_DEBOUNCE_SECS
+                    now = time.time()
+                    if now - self._last_wake_time < WAKE_DEBOUNCE_SECS:
+                        log.debug("Wake word debounced (%.1fs since last)", now - self._last_wake_time)
+                        continue
+                    self._last_wake_time = now
                     inline_cmd = _extract_command_after_wake(text, self.wake_word)
                     log.info("🎯 Wake word detected! transcript=\"%s\" inline=%s",
                              text, repr(inline_cmd))

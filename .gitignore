@@ -10,3 +10,11 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# VoxaApp build and logs
+VoxaApp/.build/
+VoxaApp/VoxaApp.app/
+VoxaApp/*.log
+
+# Improvements
+improvements.txt
