@@ -12,8 +12,8 @@ actor PythonBridge {
 
     private init() {
         let urlConfig = URLSessionConfiguration.default
-        urlConfig.timeoutIntervalForRequest = 30
-        urlConfig.timeoutIntervalForResource = 60
+        urlConfig.timeoutIntervalForRequest = 60   // LLM calls (RAG, summarization) can take 30-50s
+        urlConfig.timeoutIntervalForResource = 120
         self.session = URLSession(configuration: urlConfig)
 
         self.decoder = JSONDecoder()
@@ -236,6 +236,112 @@ actor PythonBridge {
         }
 
         return try decoder.decode(T.self, from: data)
+    }
+
+    private func put<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
+        let url = URL(string: "\(config.apiBaseURL)\(path)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "PUT"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw PythonBridgeError.requestFailed(path)
+        }
+
+        guard (200...299).contains(http.statusCode) else {
+            let detail = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw PythonBridgeError.serverError(http.statusCode, detail)
+        }
+
+        return try decoder.decode(T.self, from: data)
+    }
+
+    private func delete<T: Decodable>(_ path: String) async throws -> T {
+        let url = URL(string: "\(config.apiBaseURL)\(path)")!
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw PythonBridgeError.requestFailed(path)
+        }
+
+        guard (200...299).contains(http.statusCode) else {
+            let detail = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw PythonBridgeError.serverError(http.statusCode, detail)
+        }
+
+        return try decoder.decode(T.self, from: data)
+    }
+
+    // MARK: - Modes CRUD
+
+    struct ModesResponse: Codable {
+        let modes: [VoxaMode]
+        let count: Int
+    }
+
+    struct ModeActionResponse: Codable {
+        let success: Bool
+        let message: String
+    }
+
+    func getModes() async throws -> [VoxaMode] {
+        let res: ModesResponse = try await get("/api/modes")
+        return res.modes
+    }
+
+    func createMode(name: String, instructions: [String], description: String) async throws -> ModeActionResponse {
+        let body: [String: Any] = [
+            "name": name,
+            "instructions": instructions,
+            "description": description
+        ]
+        return try await post("/api/modes", body: body)
+    }
+
+    func updateMode(name: String, instructions: [String], description: String) async throws -> ModeActionResponse {
+        let body: [String: Any] = [
+            "instructions": instructions,
+            "description": description
+        ]
+        let nameEncoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        return try await put("/api/modes/\(nameEncoded)", body: body)
+    }
+
+    func deleteMode(name: String) async throws -> ModeActionResponse {
+        let nameEncoded = name.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? name
+        return try await delete("/api/modes/\(nameEncoded)")
+    }
+
+    // MARK: - Memory (Always-On Listening)
+
+    struct MemoryStatusResponse: Decodable {
+        let active: Bool
+        let running: Bool
+        let paused: Bool
+        let current_session: String?
+        let total_segments: Int?
+        let total_sessions: Int?
+        let total_duration_hours: Double?
+    }
+
+    func startMemory() async throws -> ModeActionResponse {
+        return try await post("/api/memory/start", body: [:])
+    }
+
+    func stopMemory() async throws -> ModeActionResponse {
+        return try await post("/api/memory/stop", body: [:])
+    }
+
+    func getMemoryStatus() async throws -> MemoryStatusResponse {
+        guard let url = URL(string: "\(config.apiBaseURL)/api/memory/status") else {
+            throw PythonBridgeError.requestFailed("/api/memory/status")
+        }
+        let (data, _) = try await session.data(from: url)
+        return try decoder.decode(MemoryStatusResponse.self, from: data)
     }
 }
 

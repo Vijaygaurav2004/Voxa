@@ -18,3 +18,6 @@ VoxaApp/*.log
 
 # Improvements
 improvements.txt
+
+# Builds
+builds/

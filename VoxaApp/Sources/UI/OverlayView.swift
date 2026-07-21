@@ -7,6 +7,23 @@ struct OverlayView: View {
 
     var body: some View {
         ZStack {
+            if state.useNotchHalo {
+                NotchHaloView()
+            } else {
+                classicBody
+            }
+        }
+        .frame(width: state.overlayWidth, height: state.overlayHeight)
+        .ignoresSafeArea()
+        .opacity(state.isOverlayVisible ? 1 : 0)
+        .scaleEffect(state.isOverlayVisible ? 1 : (state.useNotchHalo ? 0.95 : 0.68))
+        .offset(y: state.isOverlayVisible ? 0 : (state.useNotchHalo ? -60 : 0))
+        .animation(.spring(response: 0.22, dampingFraction: 0.75), value: state.isOverlayVisible)
+    }
+
+    @ViewBuilder
+    private var classicBody: some View {
+        ZStack {
             // — Glass pill background —
             RoundedRectangle(cornerRadius: 32, style: .continuous)
                 .fill(.ultraThinMaterial)
@@ -44,11 +61,6 @@ struct OverlayView: View {
                     .padding(.bottom, 28)
             }
         }
-        .frame(width: 260, height: 280)
-        // Single, ultra-fast spring — no double gate so the orb pops up in <150ms
-        .opacity(state.isOverlayVisible ? 1 : 0)
-        .scaleEffect(state.isOverlayVisible ? 1 : 0.68)
-        .animation(.spring(response: 0.15, dampingFraction: 0.78), value: state.isOverlayVisible)
     }
 
     // MARK: - Status Label

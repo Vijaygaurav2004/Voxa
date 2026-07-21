@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import Combine
+import AppKit
 
 /// Observable app state for the entire Voxa application.
 @MainActor
@@ -24,6 +25,31 @@ final class VoxaState: ObservableObject {
     @Published var lastCommand: String? = nil
     @Published var lastPlan: ActionPlan? = nil
     @Published var isOverlayVisible: Bool = false
+    @Published var useNotchHalo: Bool = UserDefaults.standard.bool(forKey: "useNotchHalo") {
+        didSet {
+            UserDefaults.standard.set(useNotchHalo, forKey: "useNotchHalo")
+            NotificationCenter.default.post(name: .voxaStateChanged, object: nil)
+        }
+    }
+    @Published var notchRect: NSRect? = nil
+
+    var overlayWidth: CGFloat {
+        if useNotchHalo {
+            let notchW = notchRect?.width ?? 180
+            return notchW + 180
+        } else {
+            return 260
+        }
+    }
+
+    var overlayHeight: CGFloat {
+        if useNotchHalo {
+            let notchH = notchRect?.height ?? 32
+            return notchH + 120
+        } else {
+            return 280
+        }
+    }
 
     // Audio levels for waveform visualization
     @Published var audioLevel: Float = 0.0
@@ -100,5 +126,33 @@ final class VoxaState: ObservableObject {
         }
     }
 
-    private init() {}
+    private init() {
+        // Default to true for Notch Halo on first launch
+        UserDefaults.standard.register(defaults: ["useNotchHalo": true])
+    }
+}
+
+extension NSScreen {
+    /// Returns the rect of the hardware notch (sensor housing) in screen coordinates.
+    /// If there is no hardware notch or the OS version is < macOS 12, returns nil.
+    var notchRect: NSRect? {
+        guard #available(macOS 12.0, *) else { return nil }
+        
+        // When a notch is present, auxiliaryTopLeftArea and auxiliaryTopRightArea are non-nil.
+        guard let topLeft = auxiliaryTopLeftArea,
+              let topRight = auxiliaryTopRightArea else {
+            return nil
+        }
+        
+        // The notch is in the middle space between these two areas.
+        let x = topLeft.maxX
+        let width = topRight.minX - topLeft.maxX
+        let height = safeAreaInsets.top
+        let y = frame.maxY - height
+        
+        // A safety check to ensure it looks like a valid notch (e.g. width/height make sense)
+        guard width > 0 && height > 0 else { return nil }
+        
+        return NSRect(x: x, y: y, width: width, height: height)
+    }
 }

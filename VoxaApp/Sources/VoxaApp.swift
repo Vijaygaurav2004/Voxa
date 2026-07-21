@@ -9,7 +9,7 @@ final class VoxaOrbPanel: NSPanel {
     init(state: VoxaState) {
         super.init(
             contentRect: .init(x: 0, y: 0, width: 260, height: 280),
-            styleMask: [.nonactivatingPanel, .borderless, .hudWindow],
+            styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
         )
@@ -17,7 +17,7 @@ final class VoxaOrbPanel: NSPanel {
         backgroundColor = .clear
         hasShadow = false            // SwiftUI view draws its own shadow
         isFloatingPanel = true
-        level = .floating
+        level = .statusBar           // Floats above the menu bar level to wrap the notch
         collectionBehavior = [.canJoinAllSpaces, .stationary]
         isMovableByWindowBackground = true
 
@@ -29,11 +29,70 @@ final class VoxaOrbPanel: NSPanel {
         host.autoresizingMask = [.width, .height]
         contentView = host
 
-        // Centre-right position (matches default Siri placement style)
-        if let screen = NSScreen.main {
-            let x = screen.visibleFrame.maxX - 300
-            let y = screen.visibleFrame.midY - 140
-            setFrameOrigin(NSPoint(x: x, y: y))
+        // Position dynamic frame correctly from the start
+        updateFrame(for: state)
+    }
+
+    // Override constrainFrameRect to prevent macOS from automatically shifting the window below the menu bar
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
+        return frameRect
+    }
+
+    func updateFrame(for state: VoxaState) {
+        // Fallback to the primary screen if NSScreen.main is not active/available.
+        guard let screen = NSScreen.main ?? NSScreen.screens.first else { return }
+        
+        let calculatedNotchRect: NSRect
+        if #available(macOS 12.0, *) {
+            if let rect = screen.notchRect {
+                calculatedNotchRect = rect
+            } else {
+                // Fallback simulated notch in the top center of the screen
+                let w: CGFloat = 180
+                let h: CGFloat = 32
+                calculatedNotchRect = NSRect(
+                    x: screen.frame.midX - w / 2,
+                    y: screen.frame.maxY - h,
+                    width: w,
+                    height: h
+                )
+            }
+        } else {
+            // Fallback simulated notch in the top center of the screen
+            let w: CGFloat = 180
+            let h: CGFloat = 32
+            calculatedNotchRect = NSRect(
+                x: screen.frame.midX - w / 2,
+                y: screen.frame.maxY - h,
+                width: w,
+                height: h
+            )
+        }
+        
+        // Update the state's notchRect
+        if state.notchRect != calculatedNotchRect {
+            state.notchRect = calculatedNotchRect
+        }
+        
+        let width = state.useNotchHalo ? (calculatedNotchRect.width + 180) : 260
+        let height = state.useNotchHalo ? (calculatedNotchRect.height + 120) : 280
+        
+        let x: CGFloat
+        let y: CGFloat
+        
+        if state.useNotchHalo {
+            // Align the panel centered horizontally on the notch and hugging the screen's top edge
+            x = calculatedNotchRect.midX - width / 2
+            y = screen.frame.maxY - height
+        } else {
+            // Centre-right position (matches default Siri placement style)
+            x = screen.visibleFrame.maxX - 300
+            y = screen.visibleFrame.midY - 140
+        }
+        
+        let newFrame = NSRect(x: x, y: y, width: width, height: height)
+        if frame != newFrame {
+            setFrame(newFrame, display: true, animate: false)
         }
     }
 }
@@ -61,6 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // MainActor.assumeIsolated satisfies the compiler without async overhead.
             MainActor.assumeIsolated {
                 guard let self, let panel = self.orbPanel else { return }
+                panel.updateFrame(for: state)
                 if state.isOverlayVisible {
                     // Instant — same runloop tick
                     panel.orderFront(nil)
@@ -73,6 +133,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+
+        // Show the floating chat ball
+        FloatingBallManager.shared.show()
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -124,6 +124,15 @@ enum ActionType: String, Codable, CaseIterable {
     case chromeClearData = "chrome_clear_data"
     case chromePrint = "chrome_print"
 
+    // Custom Modes
+    case activateMode = "activate_mode"
+
+    // Memory (Always-On Listening)
+    case memoryStart = "memory_start"
+    case memoryStop = "memory_stop"
+    case memoryQuery = "memory_query"
+    case memorySummary = "memory_summary"
+
     /// Fallback for any action type Python adds before Swift is updated.
     /// Unknown actions are forwarded to the Python backend.
     case unknown = "unknown"

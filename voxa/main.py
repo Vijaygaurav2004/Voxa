@@ -26,6 +26,7 @@ from voxa.actions.dispatcher import execute_plan
 from voxa.actions import timers as timer_module
 from voxa.feedback.overlay import VoxaOverlay
 from voxa.skills.custom_skills import skill_manager
+from voxa.skills.modes import mode_manager
 
 log = get_logger("main")
 
@@ -136,6 +137,8 @@ class Voxa:
         # Show loaded skills
         if skill_manager.skill_count > 0:
             print(f"  ✨ Skills: {skill_manager.skill_count} custom skill(s) loaded")
+        if mode_manager.mode_count > 0:
+            print(f"  🎯 Modes: {mode_manager.mode_count} custom mode(s) loaded")
 
         wake_word_display = config.WAKE_WORD.title()
         print("\n" + "=" * 55)
@@ -194,6 +197,25 @@ class Voxa:
 
                 if user_input.lower() == "skills":
                     self._show_skills()
+                    continue
+
+                if user_input.lower() in ("modes", "mode list"):
+                    self._show_modes()
+                    continue
+
+                if user_input.lower().startswith("mode create "):
+                    mode_name = user_input[len("mode create "):].strip()
+                    self._create_mode_interactive(mode_name)
+                    continue
+
+                if user_input.lower().startswith("mode edit "):
+                    mode_name = user_input[len("mode edit "):].strip()
+                    self._edit_mode_interactive(mode_name)
+                    continue
+
+                if user_input.lower().startswith("mode delete "):
+                    mode_name = user_input[len("mode delete "):].strip()
+                    self._delete_mode_interactive(mode_name)
                     continue
 
                 # Process text command — same pipeline as voice, speaks result back
@@ -300,6 +322,27 @@ class Voxa:
             print(f"\n{summary}\n")
             if self.overlay:
                 self.overlay.set_state("done", "Complete!")
+            return
+
+        # 0b. Check custom modes (LLM-based activation)
+        matched_mode = mode_manager.match_mode(user_input)
+        if matched_mode:
+            print(f"\n🎯 Mode matched: \033[1m{matched_mode.name}\033[0m")
+            speak_confirmation(matched_mode.description)
+            if self.overlay:
+                self.overlay.set_state("executing", matched_mode.description)
+
+            result = mode_manager.activate_mode(matched_mode)
+            elapsed = time.time() - start_time
+
+            if result.get("success"):
+                summary = f"✅ Mode '{matched_mode.name}' activated ({elapsed:.1f}s)"
+            else:
+                summary = f"⚠️  Mode '{matched_mode.name}' partially activated ({elapsed:.1f}s)"
+
+            print(f"\n{summary}\n")
+            if self.overlay:
+                self.overlay.set_state("done" if result.get("success") else "error", summary)
             return
 
         # 1. Parse intent
@@ -441,6 +484,124 @@ class Voxa:
             actions = s.get('actions', [])
             print(f"      {len(actions)} step{'s' if len(actions) != 1 else ''}")
         print()
+
+    def _show_modes(self):
+        """Display user-defined custom modes."""
+        modes = mode_manager.list_modes()
+        if not modes:
+            print("\n🎯 No custom modes defined. Use 'mode create <name>' to create one.\n")
+            return
+        print(f"\n🎯 Custom Modes ({len(modes)} defined):")
+        for m in modes:
+            n_inst = len(m.get('instructions', []))
+            print(f"   🔹 \033[1m{m['name']}\033[0m — trigger: \"{m['trigger']}\"")
+            print(f"      {n_inst} instruction{'s' if n_inst != 1 else ''}")
+            for inst in m.get('instructions', []):
+                print(f"        • {inst}")
+        print()
+
+    def _create_mode_interactive(self, name: str):
+        """Interactive mode creation — prompts for plain English instructions."""
+        if not name:
+            print("\n❌ Usage: mode create <name>  (e.g., 'mode create study mode')\n")
+            return
+
+        print(f"\n📝 Creating mode: \033[1m{name}\033[0m")
+        print("   Enter instructions in plain English (one per line).")
+        print("   Type \033[1mdone\033[0m when finished, or \033[1mcancel\033[0m to abort.\n")
+
+        instructions = []
+        while True:
+            try:
+                line = input(f"   \033[36m{len(instructions)+1}\033[0m> ").strip()
+                if not line:
+                    continue
+                if line.lower() == "done":
+                    break
+                if line.lower() == "cancel":
+                    print("   ❌ Cancelled.\n")
+                    return
+                instructions.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print("\n   ❌ Cancelled.\n")
+                return
+
+        if not instructions:
+            print("   ❌ No instructions entered. Mode not created.\n")
+            return
+
+        result = mode_manager.create_mode(name=name, instructions=instructions)
+        if result["success"]:
+            print(f"\n   ✅ {result['message']}\n")
+        else:
+            print(f"\n   ❌ {result['message']}\n")
+
+    def _edit_mode_interactive(self, name: str):
+        """Interactive mode editing — re-enter instructions."""
+        if not name:
+            print("\n❌ Usage: mode edit <name>  (e.g., 'mode edit work mode')\n")
+            return
+
+        mode = mode_manager.get_mode(name)
+        if not mode:
+            print(f"\n❌ Mode '{name}' not found. Use 'modes' to see available modes.\n")
+            return
+
+        print(f"\n✏️  Editing mode: \033[1m{mode.name}\033[0m")
+        print("   Current instructions:")
+        for i, inst in enumerate(mode.instructions):
+            print(f"     {i+1}. {inst}")
+        print("\n   Enter new instructions (one per line).")
+        print("   Type \033[1mdone\033[0m when finished, or \033[1mcancel\033[0m to abort.\n")
+
+        instructions = []
+        while True:
+            try:
+                line = input(f"   \033[36m{len(instructions)+1}\033[0m> ").strip()
+                if not line:
+                    continue
+                if line.lower() == "done":
+                    break
+                if line.lower() == "cancel":
+                    print("   ❌ Cancelled.\n")
+                    return
+                instructions.append(line)
+            except (EOFError, KeyboardInterrupt):
+                print("\n   ❌ Cancelled.\n")
+                return
+
+        if not instructions:
+            print("   ❌ No instructions entered. Mode not updated.\n")
+            return
+
+        result = mode_manager.edit_mode(name=name, instructions=instructions)
+        if result["success"]:
+            print(f"\n   ✅ {result['message']}\n")
+        else:
+            print(f"\n   ❌ {result['message']}\n")
+
+    def _delete_mode_interactive(self, name: str):
+        """Delete a mode with confirmation."""
+        if not name:
+            print("\n❌ Usage: mode delete <name>  (e.g., 'mode delete work mode')\n")
+            return
+
+        mode = mode_manager.get_mode(name)
+        if not mode:
+            print(f"\n❌ Mode '{name}' not found.\n")
+            return
+
+        try:
+            confirm = input(f"   Delete mode '{mode.name}'? (y/n): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n   ❌ Cancelled.\n")
+            return
+
+        if confirm in ("y", "yes"):
+            result = mode_manager.delete_mode(name)
+            print(f"   ✅ {result['message']}\n")
+        else:
+            print("   ❌ Cancelled.\n")
 
     def _start_hotkey_listener(self):
         """
@@ -626,16 +787,25 @@ class Voxa:
     "What's in my clipboard?"
     "Open Chrome and search for Python tutorials"
     "Play lo-fi music on YouTube"
+    "Activate work mode"
 
   \033[36mSystem REPL Commands:\033[0m
     voice          — Activate voice input
     devices        — List available microphones
     device <num>   — Switch to a different microphone
     skills         — List loaded custom skills
+    modes          — List custom modes
     stats          — Show usage statistics
     history        — Show recent commands
     help           — Show this help
     quit           — Exit Voxa
+
+  \033[36mCustom Modes:\033[0m
+    mode create <name>  — Create a new mode with plain English instructions
+    mode edit <name>    — Edit an existing mode's instructions
+    mode delete <name>  — Delete a mode
+    modes / mode list   — List all custom modes
+    Say the mode trigger (e.g. "work mode") to activate it.
 
   \033[36mCustom Skills:\033[0m
     Edit voxa/skills/skills.yaml to define your own shortcuts.

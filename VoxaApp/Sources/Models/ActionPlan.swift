@@ -68,6 +68,11 @@ struct Action: Codable, Identifiable {
     var tabKeyword: String?
     var scrollDirection: String?
 
+    // Custom Mode / Memory
+    var modeName: String?
+    var memoryQuestion: String?
+    var hours: Double?
+
     enum CodingKeys: String, CodingKey {
         case action, app, url, query, text, keys, command, path
         case delaySeconds = "delay_seconds"
@@ -100,6 +105,9 @@ struct Action: Codable, Identifiable {
         case tabCount = "tab_count"
         case tabKeyword = "tab_keyword"
         case scrollDirection = "scroll_direction"
+        case modeName = "mode_name"
+        case memoryQuestion = "memory_question"
+        case hours
     }
 
     /// Whether this action should execute in Swift (vs being sent to Python).

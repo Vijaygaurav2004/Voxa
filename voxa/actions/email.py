@@ -50,12 +50,9 @@ def _compose_apple_mail(to: str, subject: str, body: str) -> dict:
         script = f'''
             tell application "Mail"
                 activate
-                set newMessage to make new outgoing message with properties {{
-                    subject: "{safe_subject}",
-                    content: "{safe_body}"
-                }}
+                set newMessage to make new outgoing message with properties {{subject:"{safe_subject}", content:"{safe_body}"}}
                 tell newMessage
-                    make new to recipient with properties {{address: "{safe_to}"}}
+                    make new to recipient with properties {{address:"{safe_to}"}}
                     set visible to true
                 end tell
             end tell
@@ -85,7 +82,7 @@ def _compose_gmail(to: str, subject: str, body: str) -> dict:
         if body:
             params["body"] = body
 
-        query = urllib.parse.urlencode(params)
+        query = urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         mailto = f"mailto:{urllib.parse.quote(to)}?{query}" if params else f"mailto:{urllib.parse.quote(to)}"
 
         subprocess.run(["open", mailto], check=True, timeout=10)

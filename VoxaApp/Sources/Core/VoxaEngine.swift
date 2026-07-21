@@ -308,9 +308,11 @@ final class VoxaEngine: ObservableObject {
     }
 
     private func connectWebSocket() {
-        let session = URLSession(configuration: .default)
+        // Cancel any existing task first to prevent duplicate active listeners
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+
         let url = config.wsURL
-        let task = session.webSocketTask(with: url)
+        let task = URLSession.shared.webSocketTask(with: url)
         self.webSocketTask = task
         task.resume()
         listenWebSocket()
