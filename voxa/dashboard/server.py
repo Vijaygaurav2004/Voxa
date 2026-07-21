@@ -94,6 +94,76 @@ def create_app():
         except Exception as e:
             return JSONResponse({"success": False, "error": str(e)})
 
+    # ── Modes ──────────────────────────────────────────────────────────────
+
+    @app.get("/api/modes")
+    async def get_modes():
+        """List all user-defined custom modes."""
+        try:
+            from voxa.skills.modes import mode_manager
+            return JSONResponse({
+                "modes": mode_manager.list_modes(),
+                "count": mode_manager.mode_count,
+            })
+        except Exception as e:
+            return JSONResponse({"modes": [], "count": 0, "error": str(e)})
+
+    # Use a flexible approach for the dashboard's mode endpoints
+    from fastapi import Request
+
+    @app.post("/api/modes")
+    async def create_mode_endpoint(request: Request):
+        """Create a new custom mode."""
+        from voxa.skills.modes import mode_manager
+        body = await request.json()
+        result = mode_manager.create_mode(
+            name=body.get("name", ""),
+            instructions=body.get("instructions", []),
+            description=body.get("description", ""),
+        )
+        status = 200 if result["success"] else 400
+        return JSONResponse(result, status_code=status)
+
+    @app.put("/api/modes/{name}")
+    async def update_mode_endpoint(name: str, request: Request):
+        """Update an existing mode."""
+        from voxa.skills.modes import mode_manager
+        body = await request.json()
+        result = mode_manager.edit_mode(
+            name=name,
+            instructions=body.get("instructions"),
+            description=body.get("description"),
+        )
+        status = 200 if result["success"] else 404
+        return JSONResponse(result, status_code=status)
+
+    @app.delete("/api/modes/{name}")
+    async def delete_mode_endpoint(name: str):
+        """Delete a custom mode."""
+        from voxa.skills.modes import mode_manager
+        result = mode_manager.delete_mode(name)
+        status = 200 if result["success"] else 404
+        return JSONResponse(result, status_code=status)
+
+    @app.post("/api/modes/{name}/activate")
+    async def activate_mode_endpoint(name: str):
+        """Activate a custom mode."""
+        from voxa.skills.modes import mode_manager
+        import asyncio
+        mode = mode_manager.get_mode(name)
+        if not mode:
+            return JSONResponse({"success": False, "message": f"Mode '{name}' not found"}, status_code=404)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: mode_manager.activate_mode(mode))
+        return JSONResponse(result)
+
+    @app.post("/api/modes/reload")
+    async def reload_modes():
+        """Reload modes from disk."""
+        from voxa.skills.modes import mode_manager
+        mode_manager.reload()
+        return JSONResponse({"success": True, "count": mode_manager.mode_count})
+
     @app.get("/api/config")
     async def get_config():
         """Get non-sensitive configuration values."""
@@ -102,8 +172,15 @@ def create_app():
             "hotkey_combo": config.HOTKEY_COMBO,
             "default_browser": config.DEFAULT_BROWSER,
             "llm_model": config.LLM_MODEL,
+            "llm_model_fast": config.LLM_MODEL_FAST,
             "whisper_model": config.WHISPER_MODEL,
             "log_level": config.LOG_LEVEL,
+            "dashboard_port": config.DASHBOARD_PORT,
+            "dashboard_enabled": config.DASHBOARD_ENABLED,
+            "conversation_mode": config.CONVERSATION_MODE,
+            "followup_window_seconds": config.FOLLOWUP_WINDOW_SECONDS,
+            "confirm_dangerous": config.CONFIRM_DANGEROUS_COMMANDS,
+            "ollama_enabled": config.OLLAMA_ENABLED,
         })
 
     return app

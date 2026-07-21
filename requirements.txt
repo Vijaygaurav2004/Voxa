@@ -24,9 +24,11 @@ pynput>=1.7.6
 # Custom Skills
 pyyaml>=6.0
 
-# Web Dashboard
+# Web Dashboard + API Server
 fastapi>=0.110.0
 uvicorn>=0.29.0
+websockets>=12.0
+python-multipart>=0.0.6
 
 # Local LLM fallback (Ollama)
 requests>=2.31.0

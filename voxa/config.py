@@ -74,6 +74,14 @@ class Config:
     DASHBOARD_ENABLED: bool = os.getenv("DASHBOARD_ENABLED", "true").lower() == "true"
     DASHBOARD_PORT: int = int(os.getenv("DASHBOARD_PORT", "7429"))
 
+    # --- Memory (Always-On Ambient Listening) ---
+    MEMORY_ENABLED: bool = os.getenv("MEMORY_ENABLED", "false").lower() == "true"
+    MEMORY_CHUNK_DURATION: int = int(os.getenv("MEMORY_CHUNK_DURATION", "30"))
+    MEMORY_RETENTION_DAYS: int = int(os.getenv("MEMORY_RETENTION_DAYS", "30"))
+    MEMORY_AUTO_FILTER: bool = os.getenv("MEMORY_AUTO_FILTER", "true").lower() == "true"
+    MEMORY_SYSTEM_AUDIO: bool = os.getenv("MEMORY_SYSTEM_AUDIO", "false").lower() == "true"
+    MEMORY_STORAGE_PATH: Path = Path(os.getenv("MEMORY_STORAGE_PATH", str(Path.home() / ".voxa" / "memory")))
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate critical configuration. Returns list of errors."""

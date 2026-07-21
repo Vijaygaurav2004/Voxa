@@ -72,6 +72,19 @@ class CommandRequest(BaseModel):
     python_only: bool = True
 
 
+class ModeCreateRequest(BaseModel):
+    """Request body for creating a custom mode."""
+    name: str
+    instructions: list[str]
+    description: str = ""
+
+
+class ModeUpdateRequest(BaseModel):
+    """Request body for updating a custom mode."""
+    instructions: list[str] | None = None
+    description: str | None = None
+
+
 # ─── WebSocket Connections ───────────────────────────────────────────────────────
 
 _ws_connections: list[WebSocket] = []
@@ -183,6 +196,42 @@ def create_api_server() -> FastAPI:
                     }
         except Exception as e:
             log.warning("Skill matching in intent endpoint failed: %s", e)
+
+        # Check custom modes next
+        try:
+            from voxa.skills.modes import mode_manager
+            matched_mode = mode_manager.match_mode(req.text)
+            if matched_mode:
+                loop = asyncio.get_running_loop()
+                
+                # If the mode was created previously without pre-compiled actions, compile now and save
+                if not matched_mode.actions:
+                    def _compile_and_save():
+                        actions = mode_manager._parse_instructions(matched_mode.instructions)
+                        matched_mode.actions = actions
+                        mode_manager._save()
+                    await loop.run_in_executor(None, _compile_and_save)
+
+                from voxa.intelligence.intent_parser import Action, ActionPlan
+                actions = []
+                for a in matched_mode.actions:
+                    try:
+                        actions.append(Action.model_validate(a))
+                    except Exception as e:
+                        log.error("Failed to validate pre-compiled action: %s", e)
+
+                plan = ActionPlan(
+                    thought=f"Executing custom mode: {matched_mode.name}",
+                    actions=actions,
+                    confirmation=matched_mode.description,
+                )
+                elapsed = time.time() - start
+                return {
+                    "plan": plan.model_dump(),
+                    "elapsed_ms": int(elapsed * 1000),
+                }
+        except Exception as e:
+            log.warning("Mode matching in intent endpoint failed: %s", e)
 
         # Run in thread pool to avoid blocking the event loop
         loop = asyncio.get_running_loop()
@@ -305,6 +354,46 @@ def create_api_server() -> FastAPI:
                 }
         except Exception as e:
             log.warning("Skill check error: %s", e)
+
+        # Check custom modes next
+        try:
+            from voxa.skills.modes import mode_manager
+            matched_mode = mode_manager.match_mode(req.text)
+            if matched_mode:
+                if not matched_mode.actions:
+                    def _compile_and_save():
+                        actions = mode_manager._parse_instructions(matched_mode.instructions)
+                        matched_mode.actions = actions
+                        mode_manager._save()
+                    await loop.run_in_executor(None, _compile_and_save)
+
+                def _execute_mode():
+                    from voxa.intelligence.intent_parser import Action, ActionPlan
+                    from voxa.actions.dispatcher import execute_plan
+                    actions = []
+                    for a in matched_mode.actions:
+                        try:
+                            actions.append(Action.model_validate(a))
+                        except Exception as e:
+                            log.error("Failed to validate action: %s", e)
+
+                    combined_plan = ActionPlan(
+                        thought=f"Executing custom mode: {matched_mode.name}",
+                        actions=actions,
+                        confirmation=matched_mode.description,
+                    )
+                    return execute_plan(combined_plan)
+                
+                results = await loop.run_in_executor(None, _execute_mode)
+                elapsed = time.time() - start
+                return {
+                    "type": "mode",
+                    "mode_name": matched_mode.name,
+                    "results": results,
+                    "elapsed_ms": int(elapsed * 1000),
+                }
+        except Exception as e:
+            log.warning("Mode check error: %s", e)
 
         # Parse intent
         plan = await loop.run_in_executor(
@@ -445,6 +534,71 @@ def create_api_server() -> FastAPI:
         skill_manager.reload()
         return {"success": True, "count": skill_manager.skill_count}
 
+    # ── Custom Modes ──────────────────────────────────────────────────────────
+
+    @app.get("/api/modes")
+    async def get_modes():
+        """List all user-defined custom modes."""
+        from voxa.skills.modes import mode_manager
+        return {
+            "modes": mode_manager.list_modes(),
+            "count": mode_manager.mode_count,
+        }
+
+    @app.post("/api/modes")
+    async def create_mode(req: ModeCreateRequest):
+        """Create a new custom mode."""
+        from voxa.skills.modes import mode_manager
+        result = mode_manager.create_mode(
+            name=req.name,
+            instructions=req.instructions,
+            description=req.description,
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["message"])
+        return result
+
+    @app.put("/api/modes/{name}")
+    async def update_mode(name: str, req: ModeUpdateRequest):
+        """Update an existing custom mode."""
+        from voxa.skills.modes import mode_manager
+        result = mode_manager.edit_mode(
+            name=name,
+            instructions=req.instructions,
+            description=req.description,
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=404, detail=result["message"])
+        return result
+
+    @app.delete("/api/modes/{name}")
+    async def delete_mode(name: str):
+        """Delete a custom mode."""
+        from voxa.skills.modes import mode_manager
+        result = mode_manager.delete_mode(name)
+        if not result["success"]:
+            raise HTTPException(status_code=404, detail=result["message"])
+        return result
+
+    @app.post("/api/modes/{name}/activate")
+    async def activate_mode(name: str):
+        """Activate a custom mode — parses and executes all instructions."""
+        from voxa.skills.modes import mode_manager
+        mode = mode_manager.get_mode(name)
+        if not mode:
+            raise HTTPException(status_code=404, detail=f"Mode '{name}' not found")
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: mode_manager.activate_mode(mode))
+        return result
+
+    @app.post("/api/modes/reload")
+    async def reload_modes():
+        """Reload modes from disk."""
+        from voxa.skills.modes import mode_manager
+        mode_manager.reload()
+        return {"success": True, "count": mode_manager.mode_count}
+
     # ── Context ───────────────────────────────────────────────────────────────
 
     @app.get("/api/context")
@@ -481,7 +635,131 @@ def create_api_server() -> FastAPI:
             "followup_window_seconds": config.FOLLOWUP_WINDOW_SECONDS,
             "dashboard_enabled": config.DASHBOARD_ENABLED,
             "dashboard_port": config.DASHBOARD_PORT,
+            "memory_enabled": config.MEMORY_ENABLED,
+            "memory_chunk_duration": config.MEMORY_CHUNK_DURATION,
+            "memory_retention_days": config.MEMORY_RETENTION_DAYS,
         }
+
+    # ── Memory (Always-On Ambient Listening) ──────────────────────────────────
+
+    @app.post("/api/memory/start")
+    async def start_memory():
+        """Start the ambient listening memory engine."""
+        from voxa.memory.engine import memory_engine
+        if memory_engine.is_active:
+            return {"success": True, "message": "Memory engine is already running."}
+        
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, memory_engine.start)
+        return {"success": True, "message": "Memory engine started. Listening to everything."}
+
+    @app.post("/api/memory/stop")
+    async def stop_memory():
+        """Stop the ambient listening memory engine."""
+        from voxa.memory.engine import memory_engine
+        if not memory_engine._running:
+            return {"success": True, "message": "Memory engine is not running."}
+        
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, memory_engine.stop)
+        return {"success": True, "message": "Memory engine stopped."}
+
+    @app.get("/api/memory/status")
+    async def memory_status():
+        """Get memory engine status and statistics."""
+        from voxa.memory.engine import memory_engine
+        return memory_engine.status
+
+    @app.post("/api/memory/query")
+    async def memory_query(req: dict):
+        """
+        Ask a question about past conversations.
+        Body: {"question": "What did they say about the deadline?"}
+        """
+        from voxa.memory.recall import memory_recall
+        question = req.get("question", req.get("text", ""))
+        if not question:
+            raise HTTPException(status_code=400, detail="Missing 'question' field")
+        
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: memory_recall.answer_question(question))
+        return result
+
+    @app.get("/api/memory/recent")
+    async def memory_recent(hours: float = 24.0, limit: int = 50):
+        """Get recent memory segments."""
+        from voxa.memory.engine import memory_engine
+        store = memory_engine.store
+        segments = store.get_recent(hours=hours, limit=limit)
+        return {"segments": [s.to_dict() for s in segments], "count": len(segments)}
+
+    @app.get("/api/memory/sessions")
+    async def memory_sessions(limit: int = 20):
+        """List recent conversation sessions."""
+        from voxa.memory.engine import memory_engine
+        store = memory_engine.store
+        sessions = store.list_sessions(limit=limit)
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.get("/api/memory/session/{session_id}")
+    async def memory_session_detail(session_id: str):
+        """Get all segments from a specific conversation session."""
+        from voxa.memory.engine import memory_engine
+        store = memory_engine.store
+        segments = store.get_by_session(session_id)
+        return {"segments": [s.to_dict() for s in segments], "count": len(segments)}
+
+    @app.post("/api/memory/summarize")
+    async def memory_summarize(req: dict):
+        """
+        Summarize conversations.
+        Body: {"hours": 24} or {"session_id": "abc12345"}
+        """
+        from voxa.memory.recall import memory_recall
+        loop = asyncio.get_running_loop()
+
+        if "session_id" in req:
+            result = await loop.run_in_executor(
+                None, lambda: memory_recall.summarize_session(req["session_id"])
+            )
+        else:
+            hours = req.get("hours", 24.0)
+            result = await loop.run_in_executor(
+                None, lambda: memory_recall.summarize_recent(hours)
+            )
+        return result
+
+    @app.post("/api/memory/search")
+    async def memory_search(req: dict):
+        """
+        Raw search across memory.
+        Body: {"query": "search terms", "limit": 10}
+        """
+        from voxa.memory.recall import memory_recall
+        query = req.get("query", "")
+        limit = req.get("limit", 10)
+        if not query:
+            raise HTTPException(status_code=400, detail="Missing 'query' field")
+        
+        loop = asyncio.get_running_loop()
+        results = await loop.run_in_executor(None, lambda: memory_recall.search(query, limit))
+        return {"results": results, "count": len(results)}
+
+    @app.delete("/api/memory/clear")
+    async def memory_clear():
+        """Clear ALL memory segments permanently."""
+        from voxa.memory.engine import memory_engine
+        store = memory_engine.store
+        count = store.clear_all()
+        return {"success": True, "message": f"Cleared {count} memory segments.", "deleted_count": count}
+
+    @app.post("/api/memory/cleanup")
+    async def memory_cleanup(req: dict = None):
+        """Delete memory segments older than N days."""
+        from voxa.memory.engine import memory_engine
+        days = (req or {}).get("days", config.MEMORY_RETENTION_DAYS)
+        deleted = memory_engine.cleanup(days)
+        return {"success": True, "deleted_count": deleted, "retention_days": days}
 
     # ── WebSocket for real-time status ────────────────────────────────────────
 
@@ -505,7 +783,8 @@ def create_api_server() -> FastAPI:
                 if data == "ping":
                     await websocket.send_text(json.dumps({"event": "pong", "timestamp": time.time()}))
         except WebSocketDisconnect:
-            _ws_connections.remove(websocket)
+            if websocket in _ws_connections:
+                _ws_connections.remove(websocket)
             log.info("WebSocket client disconnected (%d remaining)", len(_ws_connections))
 
     return app

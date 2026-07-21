@@ -391,3 +391,230 @@ class ContinuousListener:
             except Exception as e:
                 log.error("Error in listen loop: %s", e)
                 time.sleep(1)
+
+
+# ─── Ambient Capture (Always-On for Memory) ──────────────────────────────────────
+
+class AmbientCapture:
+    """
+    Long-running ambient audio capture for the Memory system.
+    Captures in 30-second chunks, runs VAD to check if the chunk contains speech,
+    and yields speech-containing chunks for transcription.
+
+    Supports dual-stream capture:
+      - Microphone: captures the user's voice
+      - System audio: captures the other side of calls/meetings (requires BlackHole)
+
+    Design: Extremely low CPU — only runs VAD locally. No transcription happens here.
+    """
+
+    def __init__(
+        self,
+        chunk_duration: float = 30.0,
+        on_speech_chunk: Optional[Callable[[bytes, str], None]] = None,
+        enable_system_audio: bool = False,
+        vad_aggressiveness: int = 2,  # Lower than command mode for ambient
+    ):
+        """
+        Args:
+            chunk_duration: Duration of each audio chunk in seconds.
+            on_speech_chunk: Callback(wav_bytes, source) fired when a speech chunk is detected.
+                             source is 'microphone', 'system_audio', or 'both'.
+            enable_system_audio: If True, also capture system audio via BlackHole.
+            vad_aggressiveness: VAD level (0=least aggressive, 3=most). 2 is good for ambient.
+        """
+        self.chunk_duration = chunk_duration
+        self.on_speech_chunk = on_speech_chunk
+        self.enable_system_audio = enable_system_audio
+        self.vad_aggressiveness = vad_aggressiveness
+
+        self._running = False
+        self._paused = False
+        self._mic_thread: Optional[threading.Thread] = None
+        self._sys_thread: Optional[threading.Thread] = None
+
+        # Detect system audio device
+        self._system_device_index: Optional[int] = None
+        if enable_system_audio:
+            self._system_device_index = self._detect_system_audio_device()
+
+    def _detect_system_audio_device(self) -> Optional[int]:
+        """Auto-detect BlackHole or similar virtual audio loopback device."""
+        try:
+            for i, dev in enumerate(sd.query_devices()):
+                name = dev["name"].lower()
+                if dev["max_input_channels"] > 0 and any(
+                    kw in name for kw in ["blackhole", "loopback", "soundflower", "virtual"]
+                ):
+                    log.info("🔊 System audio device detected: '%s' (index %d)", dev["name"], i)
+                    return i
+        except Exception as e:
+            log.warning("Could not detect system audio device: %s", e)
+
+        log.info("ℹ️  No system audio loopback device found. "
+                 "Install BlackHole (https://github.com/ExistentialAudio/BlackHole) "
+                 "to capture call/meeting audio.")
+        return None
+
+    def start(self):
+        """Start ambient capture in background thread(s)."""
+        if self._running:
+            return
+
+        self._running = True
+        self._paused = False
+
+        # Microphone capture thread
+        self._mic_thread = threading.Thread(
+            target=self._capture_loop,
+            args=(None, "microphone"),
+            daemon=True,
+            name="ambient-mic",
+        )
+        self._mic_thread.start()
+        log.info("🎙️ Ambient microphone capture started (%.0fs chunks)", self.chunk_duration)
+
+        # System audio capture thread (if available)
+        if self._system_device_index is not None:
+            self._sys_thread = threading.Thread(
+                target=self._capture_loop,
+                args=(self._system_device_index, "system_audio"),
+                daemon=True,
+                name="ambient-sys",
+            )
+            self._sys_thread.start()
+            log.info("🔊 Ambient system audio capture started")
+
+    def stop(self):
+        """Stop ambient capture."""
+        self._running = False
+        if self._mic_thread:
+            self._mic_thread.join(timeout=5)
+        if self._sys_thread:
+            self._sys_thread.join(timeout=5)
+        log.info("🛑 Ambient capture stopped")
+
+    def pause(self):
+        """Temporarily pause capture (e.g., during Voxa command processing)."""
+        self._paused = True
+        log.debug("⏸️ Ambient capture paused")
+
+    def resume(self):
+        """Resume capture after pause."""
+        self._paused = False
+        log.debug("▶️ Ambient capture resumed")
+
+    @property
+    def is_active(self) -> bool:
+        return self._running and not self._paused
+
+    def _capture_loop(self, device_index: Optional[int], source: str):
+        """
+        Main capture loop for a single audio source.
+        Records in chunk_duration-second chunks, runs VAD to detect speech,
+        and fires the callback with speech-containing chunks.
+        """
+        capture_rate = get_best_sample_rate(device_index)
+        frame_duration_ms = 30
+        frame_size = int(capture_rate * frame_duration_ms / 1000)
+        frames_per_chunk = int(self.chunk_duration * 1000 / frame_duration_ms)
+
+        vad = webrtcvad.Vad(self.vad_aggressiveness)
+        vad_rate = capture_rate if capture_rate in VAD_SUPPORTED_RATES else 16000
+
+        log.info("📡 Ambient %s capture: device=%s, rate=%dHz",
+                 source, device_index or "default", capture_rate)
+
+        while self._running:
+            if self._paused:
+                time.sleep(0.5)
+                continue
+
+            chunk_frames: List[np.ndarray] = []
+            speech_frame_count = 0
+
+            try:
+                with sd.RawInputStream(
+                    device=device_index,
+                    samplerate=capture_rate,
+                    channels=1,
+                    dtype="int16",
+                    blocksize=frame_size,
+                ) as stream:
+                    for _ in range(frames_per_chunk):
+                        if not self._running or self._paused:
+                            break
+
+                        data, overflowed = stream.read(frame_size)
+                        frame_bytes = bytes(data)
+                        chunk_frames.append(np.frombuffer(frame_bytes, dtype=np.int16).copy())
+
+                        # VAD check
+                        vad_frame = frame_bytes
+                        if capture_rate != vad_rate:
+                            arr = np.frombuffer(frame_bytes, dtype=np.int16)
+                            arr_r = resample_audio(arr, capture_rate, vad_rate)
+                            vad_frame_samples = int(vad_rate * frame_duration_ms / 1000)
+                            if len(arr_r) > vad_frame_samples:
+                                arr_r = arr_r[:vad_frame_samples]
+                            elif len(arr_r) < vad_frame_samples:
+                                arr_r = np.pad(arr_r, (0, vad_frame_samples - len(arr_r)))
+                            vad_frame = arr_r.tobytes()
+
+                        try:
+                            if vad.is_speech(vad_frame, vad_rate):
+                                speech_frame_count += 1
+                        except Exception:
+                            pass
+
+            except sd.PortAudioError as e:
+                log.error("Ambient capture error (%s): %s", source, e)
+                time.sleep(5)
+                continue
+            except Exception as e:
+                log.error("Unexpected ambient capture error (%s): %s", source, e)
+                time.sleep(2)
+                continue
+
+            if not chunk_frames or not self._running:
+                continue
+
+            # Calculate speech ratio in this chunk
+            speech_ratio = speech_frame_count / max(len(chunk_frames), 1)
+
+            # Only process chunks with >10% speech content
+            if speech_ratio < 0.10:
+                log.debug("🔇 Ambient chunk (%s): %.0f%% speech — skipping",
+                          source, speech_ratio * 100)
+                continue
+
+            log.info("🗣️ Ambient chunk (%s): %.0f%% speech — processing",
+                     source, speech_ratio * 100)
+
+            # Combine frames and resample to 16kHz for Whisper
+            audio_data = np.concatenate(chunk_frames)
+            if capture_rate != WHISPER_RATE:
+                audio_data = resample_audio(audio_data, capture_rate, WHISPER_RATE)
+
+            wav_bytes = self._array_to_wav(audio_data, WHISPER_RATE)
+
+            # Fire callback
+            if self.on_speech_chunk:
+                try:
+                    self.on_speech_chunk(wav_bytes, source)
+                except Exception as e:
+                    log.error("Error in speech chunk callback: %s", e)
+
+    @staticmethod
+    def _array_to_wav(audio: np.ndarray, sample_rate: int) -> bytes:
+        """Convert numpy int16 array to WAV bytes."""
+        import io
+        import wave
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(audio.tobytes())
+        return wav_buffer.getvalue()
+

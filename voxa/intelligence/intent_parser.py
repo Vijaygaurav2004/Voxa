@@ -123,6 +123,13 @@ class ActionType(str, Enum):
     CHROME_BOOKMARK_ALL_TABS = "chrome_bookmark_all_tabs" # Bookmark all open tabs
     CHROME_CLEAR_DATA     = "chrome_clear_data"      # Clear browsing data
     CHROME_PRINT          = "chrome_print"           # Print current page
+    # ── Custom Modes ─────────────────────────────────────────────────────
+    ACTIVATE_MODE         = "activate_mode"          # Activate a user-defined custom mode
+    # ── Memory (Always-On Listening) ─────────────────────────────────────
+    MEMORY_START          = "memory_start"            # Start ambient listening memory
+    MEMORY_STOP           = "memory_stop"             # Stop ambient listening memory
+    MEMORY_QUERY          = "memory_query"            # Ask a question about past conversations
+    MEMORY_SUMMARY        = "memory_summary"          # Summarize recent conversations
 
 
 # ─── Action Classification ───────────────────────────────────────────────────────
@@ -178,6 +185,9 @@ PYTHON_ACTIONS = {
     ActionType.CHROME_FULL_SCREEN, ActionType.CHROME_BOOKMARK_BAR,
     ActionType.CHROME_BOOKMARK_ALL_TABS, ActionType.CHROME_CLEAR_DATA,
     ActionType.CHROME_PRINT,
+    ActionType.ACTIVATE_MODE,
+    ActionType.MEMORY_START, ActionType.MEMORY_STOP,
+    ActionType.MEMORY_QUERY, ActionType.MEMORY_SUMMARY,
 }
 
 
@@ -244,6 +254,11 @@ class Action(BaseModel):
     tab_count: Optional[int] = None     # Number of tabs for chrome_new_tabs
     tab_keyword: Optional[str] = None   # Keyword for chrome_find_tab
     scroll_direction: Optional[str] = None  # "up" or "down" for chrome_scroll
+    # Mode
+    mode_name: Optional[str] = None      # Name of mode to activate (for activate_mode)
+    # Memory
+    memory_question: Optional[str] = None  # Question about past conversations (for memory_query)
+    hours: Optional[float] = None          # Time range for memory_summary (hours)
 
     def model_post_init(self, __context):
         """Auto-classify execution_target if not explicitly set."""
@@ -425,6 +440,19 @@ You can:
 | email_compose | email_to, email_subject, email_body | Compose email |
 | speak | text | Say something to the user |
 
+### Custom Modes
+| Action | Required Fields | Description |
+|--------|----------------|-------------|
+| activate_mode | mode_name | Activate a user-defined custom mode by name. Use when the user says "activate X mode", "switch to X mode", "enable X mode", etc. |
+
+### Memory (Always-On Listening)
+| Action | Required Fields | Description |
+|--------|----------------|-------------|
+| memory_start | - | Start the ambient listening memory engine. Use when the user says "start listening", "remember everything", "start recording", etc. |
+| memory_stop | - | Stop the ambient listening memory engine. Use when the user says "stop listening", "stop recording", "turn off memory", etc. |
+| memory_query | memory_question | Ask a question about past conversations stored in memory. Use when the user asks "what did he say about...", "do you remember when...", "what was discussed about...", etc. |
+| memory_summary | hours (optional, default 24) | Summarize recent conversations. Use when the user says "summarize today's meetings", "what happened today", "give me a recap", etc. |
+
 ### Coding Editor AI
 | Action | Required Fields | Description |
 |--------|----------------|-------------|
@@ -443,9 +471,8 @@ You can:
 4. **Keyboard shortcuts** → use `keystroke` e.g. `keys="cmd+s"` to save, `keys="cmd+c"` to copy.
 5. **Open app then do something** → always add `wait` (1.5-2s) after `open_app` before interacting.
 5a. **Multi-app tasks** → if the user wants multiple apps opened, include all open_app+wait steps BEFORE interacting. E.g. "open Chrome and Mail" → [open_app Chrome, wait 1.5s, open_app Mail, wait 1.5s].
-5b. **Draft email in Mail app** → [open_app Mail, wait 1.5s, keystroke("cmd+n"), wait 1s, vision_click("To field"), type_text("recipient@example.com"), keystroke("tab"), type_text("Subject"), keystroke("tab"), type_text("Body text"), keystroke("cmd+shift+d") to send]. For just drafting (not sending), skip the last keystroke.
-5c. **Draft email in Gmail (browser)** → [open_app Google Chrome, wait 1.5, browser_navigate to "https://mail.google.com", wait 2s, vision_click("Compose button"), wait 1s, vision_click("To field"), type_text("email"), vision_click("Subject field"), type_text("Subject"), vision_click("body area"), type_text("body")].
-5d. **Email content**: When drafting an email, compose a complete, professional, natural-sounding body text. Do not just say "email body". Write the full email.
+5b. **Draft email** → Use the dedicated `email_compose` action which opens Apple Mail (or Gmail fallback) and composes the email instantly. Example: `email_compose(email_to="recipient@example.com", email_subject="Subject", email_body="Body text")`.
+5c. **Email content**: When drafting an email, compose a complete, professional, natural-sounding body text. Do not just say "email body". Write the full email.
 6. **Menu bar items** → use `ax_menu` with `menu_path=["File", "Open"]`.
 7. **YouTube** → `play_youtube`. **Netflix** → `search_netflix`.
 8. **Volume up/down** → `system_volume` with direction="up" or "down".
@@ -537,30 +564,10 @@ You can:
 "Open display settings" → [{shell_command: command="open \"x-apple.systempreferences:com.apple.Displays-Settings-Extension\""}]
 "Lock my Mac" → [{shell_command: command="osascript -e 'tell application \"System Events\" to keystroke \"q\" using {control down, command down}'"}]
 "Open Chrome and draft an email about my internship result" → [
-  {open_app: app="Google Chrome"},
-  {wait: delay_seconds=1.5},
-  {chrome_navigate: url="https://mail.google.com"},
-  {wait: delay_seconds=2.5},
-  {vision_click: element="Compose button"},
-  {wait: delay_seconds=1.0},
-  {vision_click: element="To field"},
-  {type_text: text="recipient@example.com"},
-  {vision_click: element="Subject field"},
-  {type_text: text="Internship Result"},
-  {vision_click: element="email body area"},
-  {type_text: text="Dear [Name],\n\nI am pleased to share that I have successfully completed my internship and received a positive result. The experience has been invaluable, and I look forward to discussing this further.\n\nBest regards,\n[Your Name]"}
+  {email_compose: email_to="", email_subject="Internship Result", email_body="Dear [Name],\n\nI am pleased to share that I have successfully completed my internship and received a positive result. The experience has been invaluable, and I look forward to discussing this further.\n\nBest regards,\n[Your Name]"}
 ]
 "Open Mail and write an email to john@example.com about my internship result" → [
-  {open_app: app="Mail"},
-  {wait: delay_seconds=1.5},
-  {keystroke: keys="cmd+n"},
-  {wait: delay_seconds=1.0},
-  {vision_click: element="To field"},
-  {type_text: text="john@example.com"},
-  {keystroke: keys="tab"},
-  {type_text: text="Internship Result Update"},
-  {keystroke: keys="tab"},
-  {type_text: text="Dear John,\n\nI wanted to share that I have received a positive outcome from my recent internship. The experience was extremely valuable and I am grateful for the opportunity.\n\nBest regards"}
+  {email_compose: email_to="john@example.com", email_subject="Internship Result Update", email_body="Dear John,\n\nI wanted to share that I have received a positive outcome from my recent internship. The experience was extremely valuable and I am grateful for the opportunity.\n\nBest regards"}
 ]
 "Open Keynote" → [{open_app: app="Keynote"}]
 "Open system settings" → [{open_app: app="System Settings"}]
@@ -590,10 +597,22 @@ You can:
 "Open wifi settings" → [{shell_command: command="open \"x-apple.systempreferences:com.apple.wifi-settings-extension\""}]
 "Open display settings" → [{shell_command: command="open \"x-apple.systempreferences:com.apple.Displays-Settings-Extension\""}]
 "Lock my Mac" → [{shell_command: command="osascript -e 'tell application \"System Events\" to keystroke \"q\" using {control down, command down}'"}]
+"Activate work mode" → [{activate_mode: mode_name="work mode"}]
+"Switch to study mode" → [{activate_mode: mode_name="study mode"}]
+"Enable chill mode" → [{activate_mode: mode_name="chill mode"}]
+"Start listening to everything" → [{memory_start}]
+"Remember everything from now" → [{memory_start}]
+"Stop recording" → [{memory_stop}]
+"What did he say about the deadline?" → [{memory_query: memory_question="What was said about the deadline?"}]
+"Do you remember what Aman said about the project?" → [{memory_query: memory_question="What did Aman say about the project?"}]
+"Summarize today's meetings" → [{memory_summary: hours=24}]
+"What happened in the last hour?" → [{memory_summary: hours=1}]
+"Give me a recap of today" → [{memory_summary: hours=24}]
 
 ## Context
 Default browser: Google Chrome. OS: macOS.
 For follow-up commands like "close that" or "the next one", use conversation history to resolve references.
+{modes_context}
 """
 
 
@@ -629,8 +648,16 @@ def parse_intent(
     model = config.LLM_MODEL_FAST if use_fast_model else config.LLM_MODEL
     log.info("🧠 Parsing intent with %s: \"%s\"", model, user_input)
 
+    # Inject user-defined mode names into the system prompt
+    try:
+        from voxa.skills.modes import mode_manager
+        modes_context = mode_manager.get_mode_names_for_prompt()
+    except Exception:
+        modes_context = ""
+    system_prompt = SYSTEM_PROMPT.replace("{modes_context}", modes_context)
+
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
     ]
 
     # Inject conversation context if available

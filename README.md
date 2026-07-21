@@ -98,6 +98,17 @@ cd VoxaApp
 swift run
 ```
 
+#### 📦 Creating Versioned Releases
+To compile the release binary and package it into a native, version-incremented macOS application, run:
+```bash
+python3 scripts/build.py
+```
+This script will:
+1. Compile the application in release mode using Swift Package Manager.
+2. Automatically scan the `builds/` directory to determine the next version number (e.g. `voxa 2`, `voxa 3`, etc.).
+3. Package the app bundle with customized plist metadata and copy the release binary.
+4. Keep all past builds safe in the `builds/` folder.
+
 ---
 
 ### ⚙️ macOS System Permissions

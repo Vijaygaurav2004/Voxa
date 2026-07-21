@@ -39,6 +39,8 @@ SPEAK_RESULT_ACTIONS = {
     ActionType.SEND_WHATSAPP,
     ActionType.REPLY_WHATSAPP,
     ActionType.EMAIL_COMPOSE,
+    ActionType.MEMORY_QUERY,
+    ActionType.MEMORY_SUMMARY,
 }
 
 
@@ -452,6 +454,44 @@ def execute_action(action: Action) -> dict:
             return chrome_mod.clear_browsing_data()
         elif action_type == ActionType.CHROME_PRINT:
             return chrome_mod.print_page()
+
+        # ── Custom Modes ─────────────────────────────────────────────────────
+        elif action_type == ActionType.ACTIVATE_MODE:
+            from voxa.skills.modes import mode_manager
+            return mode_manager.activate_mode(action.mode_name or action.description)
+
+        # ── Memory (Always-On Listening) ─────────────────────────────────────
+        elif action_type == ActionType.MEMORY_START:
+            from voxa.memory.engine import memory_engine
+            memory_engine.start()
+            return {"success": True, "action": "memory_start", "message": "Memory engine started. I'm now listening to everything."}
+
+        elif action_type == ActionType.MEMORY_STOP:
+            from voxa.memory.engine import memory_engine
+            memory_engine.stop()
+            return {"success": True, "action": "memory_stop", "message": "Memory engine stopped."}
+
+        elif action_type == ActionType.MEMORY_QUERY:
+            from voxa.memory.recall import memory_recall
+            question = action.memory_question or action.query or action.description
+            result = memory_recall.answer_question(question)
+            return {
+                "success": True,
+                "action": "memory_query",
+                "message": result.get("answer", "No answer found."),
+                "sources": result.get("source_count", 0),
+            }
+
+        elif action_type == ActionType.MEMORY_SUMMARY:
+            from voxa.memory.recall import memory_recall
+            hours = action.hours or 24.0
+            result = memory_recall.summarize_recent(hours)
+            return {
+                "success": True,
+                "action": "memory_summary",
+                "message": result.get("summary", "No conversations found."),
+                "segment_count": result.get("segment_count", 0),
+            }
 
         else:
             log.error("Unknown action type: %s", action.action)

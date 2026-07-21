@@ -9,6 +9,7 @@ struct VoxaConfig {
     let wakeWord: String
     let hotkeyCombo: String
     let defaultBrowser: String
+    let dashboardPort: Int
 
     /// Base URL for the Python API server.
     var apiBaseURL: URL {
@@ -79,5 +80,6 @@ struct VoxaConfig {
         self.wakeWord = env["WAKE_WORD"] ?? "hey voxa"
         self.hotkeyCombo = env["HOTKEY_COMBO"] ?? "cmd+shift+v"
         self.defaultBrowser = env["DEFAULT_BROWSER"] ?? "Google Chrome"
+        self.dashboardPort = Int(env["DASHBOARD_PORT"] ?? "7429") ?? 7429
     }
 }

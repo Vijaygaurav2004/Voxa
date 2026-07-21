@@ -18,7 +18,8 @@ final class ActionRouter {
     private let speakResultActions: Set<ActionType> = [
         .screenRead, .screenshot, .clipboardGet, .systemBattery,
         .listTimers, .calendarToday, .calendarUpcoming, .remindersList,
-        .mediaNowPlaying, .chromeListTabs, .chromePageInfo
+        .mediaNowPlaying, .chromeListTabs, .chromePageInfo,
+        .memoryQuery, .memorySummary
     ]
 
     /// Route and execute a complete ActionPlan.
