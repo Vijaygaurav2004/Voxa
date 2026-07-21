@@ -279,14 +279,80 @@ class ModeManager:
 
     # ── Trigger Matching ──────────────────────────────────────────────────────
 
-    def match_mode(self, user_input: str) -> Mode | None:
+    def _match_mode_with_llm(self, user_input: str) -> Mode | None:
+        """
+        Use small/fast LLM (config.LLM_MODEL_FAST e.g. gpt-4o-mini) to match
+        vague user prompts (e.g. "I want to focus now", "time to relax") to custom modes.
+        """
+        if not self.modes:
+            return None
+
+        try:
+            from openai import OpenAI
+            from voxa.config import config
+
+            api_key = config.OPENAI_API_KEY
+            if not api_key:
+                return None
+
+            client = OpenAI(api_key=api_key)
+
+            modes_info = []
+            for m in self.modes:
+                inst_str = ", ".join(m.instructions[:3])
+                modes_info.append(f'- Mode Name: "{m.name}" | Trigger: "{m.trigger}" | Description: "{m.description}" | Steps: [{inst_str}]')
+
+            prompt = (
+                "You are an intent classifier for system modes.\n"
+                "The user has defined the following custom modes:\n"
+                + "\n".join(modes_info) + "\n\n"
+                f'User prompt: "{user_input}"\n\n'
+                "Task: Decide if the user prompt is vaguely or explicitly describing an intent to activate or switch to one of the custom modes listed above.\n"
+                "Examples:\n"
+                "- Prompt: 'I need to focus and write code' -> matches 'Work Mode'\n"
+                "- Prompt: 'Time to chill and play music' -> matches 'Chill Mode'\n"
+                "- Prompt: 'Getting ready for study' -> matches 'Study Mode'\n\n"
+                "Return a JSON object:\n"
+                '{"match": true, "trigger": "<trigger_or_name>"}\n'
+                "or if it does not match any mode:\n"
+                '{"match": false, "trigger": null}'
+            )
+
+            response = client.chat.completions.create(
+                model=config.LLM_MODEL_FAST,
+                messages=[
+                    {"role": "system", "content": "You are a fast intent classifier. Return valid JSON only."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+                response_format={"type": "json_object"},
+                max_tokens=60,
+            )
+
+            content = response.choices[0].message.content or ""
+            data = json.loads(content)
+            if data.get("match") and data.get("trigger"):
+                trig = str(data["trigger"]).lower().strip()
+                matched = self._find_by_trigger(trig)
+                if matched:
+                    log.info("🧠 Small LLM matched vague prompt '%s' -> mode '%s'", user_input, matched.name)
+                    return matched
+        except Exception as e:
+            log.warning("Small LLM mode match failed: %s", e)
+
+        return None
+
+    def match_mode(self, user_input: str, allow_llm: bool = True) -> Mode | None:
         """
         Check if user input matches any mode trigger.
-        Matching is case-insensitive. Supports exact match and common
-        activation phrases like "activate X", "switch to X", "enable X".
+        Matching is case-insensitive. Supports:
+        1. Exact match & activation prefixes ("activate X", "switch to X")
+        2. Levenshtein fuzzy distance matching
+        3. Small LLM intent classification for vague prompts ("I want to focus now" -> Work Mode)
 
         Args:
             user_input: The raw user command string.
+            allow_llm: Whether to use fast LLM fallback for vague intent matching.
 
         Returns:
             Matched Mode, or None.
@@ -315,7 +381,14 @@ class ModeManager:
                 if matched:
                     return matched
 
+        # Fast LLM intent matching for vague prompts
+        if allow_llm and self.modes:
+            matched_llm = self._match_mode_with_llm(user_input)
+            if matched_llm:
+                return matched_llm
+
         return None
+
 
     # ── Activation ────────────────────────────────────────────────────────────
 

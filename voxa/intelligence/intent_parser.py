@@ -600,6 +600,8 @@ You can:
 "Activate work mode" → [{activate_mode: mode_name="work mode"}]
 "Switch to study mode" → [{activate_mode: mode_name="study mode"}]
 "Enable chill mode" → [{activate_mode: mode_name="chill mode"}]
+"I need to focus and write code" → [{activate_mode: mode_name="work mode"}]
+"Time to relax and listen to music" → [{activate_mode: mode_name="chill mode"}]
 "Start listening to everything" → [{memory_start}]
 "Remember everything from now" → [{memory_start}]
 "Stop recording" → [{memory_stop}]
@@ -770,6 +772,7 @@ def is_simple_command(user_input: str) -> bool:
         "show me ", "find ", "where is ",
         "how far ", "distance from ", "directions ", "directions from ",
         "maps ", "open maps",
+        "activate ", "switch to ", "enable ", "enter mode", "mode ",
     ]
     lower = user_input.lower().strip()
     # If command matches a simple pattern and has no "and" / "then", it's simple
