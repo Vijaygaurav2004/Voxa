@@ -31,6 +31,9 @@ struct FloatingBallView: View {
     // Ball pulse animation
     @State private var isPulsing: Bool = false
 
+    // Header drag-to-move state
+    @State private var isDraggingPanel: Bool = false
+
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
             if isChatOpen {
@@ -48,10 +51,27 @@ struct FloatingBallView: View {
         }
         .frame(
             width: isChatOpen ? 360 : 56,
-            height: isChatOpen ? 520 : 56,
+            // Chat panel is 480 tall + 64 bottom padding (for the ball) = 544;
+            // give it 560 so the header isn't clipped at the top.
+            height: isChatOpen ? 560 : 56,
             alignment: .bottomTrailing
         )
         .animation(.spring(response: 0.4, dampingFraction: 0.8), value: isChatOpen)
+        .onChange(of: isChatOpen) { open in
+            // Resize the host NSPanel so the chat panel isn't clipped by the
+            // collapsed 64×64 window.
+            if open {
+                // Grow first so the expanding chat has room.
+                FloatingBallManager.shared.setChatOpen(true)
+            } else {
+                // Let the collapse transition play, then shrink the window.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
+                    if !isChatOpen {
+                        FloatingBallManager.shared.setChatOpen(false)
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Ball Button
@@ -213,6 +233,29 @@ struct FloatingBallView: View {
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .contentShape(Rectangle())
+        .gesture(headerDragGesture)
+        .onHover { hovering in
+            // Signal that the header is a move handle.
+            if hovering { NSCursor.openHand.push() } else { NSCursor.pop() }
+        }
+        .help("Drag to move")
+    }
+
+    /// Drag the whole chat panel by its header, like a window title bar.
+    private var headerDragGesture: some Gesture {
+        DragGesture(minimumDistance: 2)
+            .onChanged { _ in
+                if !isDraggingPanel {
+                    isDraggingPanel = true
+                    FloatingBallManager.shared.beginPanelDrag()
+                }
+                FloatingBallManager.shared.updatePanelDrag()
+            }
+            .onEnded { _ in
+                isDraggingPanel = false
+                FloatingBallManager.shared.endPanelDrag()
+            }
     }
 
     // MARK: - Chat Messages

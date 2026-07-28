@@ -8,7 +8,7 @@ import AppKit
 final class VoxaOrbPanel: NSPanel {
     init(state: VoxaState) {
         super.init(
-            contentRect: .init(x: 0, y: 0, width: 260, height: 280),
+            contentRect: .init(x: 0, y: 0, width: 460, height: 340),
             styleMask: [.nonactivatingPanel, .borderless],
             backing: .buffered,
             defer: false
@@ -74,20 +74,23 @@ final class VoxaOrbPanel: NSPanel {
             state.notchRect = calculatedNotchRect
         }
         
-        let width = state.useNotchHalo ? (calculatedNotchRect.width + 180) : 260
-        let height = state.useNotchHalo ? (calculatedNotchRect.height + 120) : 280
-        
+        // Must match VoxaState.overlayWidth / overlayHeight (classic 460x340;
+        // halo height includes +56 for the live transcript line).
+        let width = state.useNotchHalo ? (calculatedNotchRect.width + 180) : 460
+        let height = state.useNotchHalo ? (calculatedNotchRect.height + 176) : 340
+
         let x: CGFloat
         let y: CGFloat
-        
+
         if state.useNotchHalo {
             // Align the panel centered horizontally on the notch and hugging the screen's top edge
             x = calculatedNotchRect.midX - width / 2
             y = screen.frame.maxY - height
         } else {
-            // Centre-right position (matches default Siri placement style)
-            x = screen.visibleFrame.maxX - 300
-            y = screen.visibleFrame.midY - 140
+            // Centre-right position (matches default Siri placement style):
+            // 40pt right margin, vertically centred — sized for the new pill.
+            x = screen.visibleFrame.maxX - width - 40
+            y = screen.visibleFrame.midY - height / 2
         }
         
         let newFrame = NSRect(x: x, y: y, width: width, height: height)
@@ -147,6 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 extension Notification.Name {
     static let voxaStateChanged = Notification.Name("voxaStateChanged")
+    static let voxaIntegrationsChanged = Notification.Name("voxaIntegrationsChanged")
 }
 
 // MARK: - Main App
@@ -159,7 +163,17 @@ struct VoxaApp: App {
     @StateObject private var state = VoxaState.shared
 
     var body: some Scene {
-        // Menu bar extra — no Dock icon, just a menu bar presence
+        // Main application window
+        WindowGroup("Voxa", id: "main") {
+            MainWindow()
+                .environmentObject(engine)
+                .environmentObject(state)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentMinSize)
+        .defaultSize(width: 980, height: 660)
+
+        // Menu bar extra — quick access without opening the main window
         MenuBarExtra {
             MenuBarView()
                 .environmentObject(engine)

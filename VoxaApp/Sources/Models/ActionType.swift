@@ -133,6 +133,12 @@ enum ActionType: String, Codable, CaseIterable {
     case memoryQuery = "memory_query"
     case memorySummary = "memory_summary"
 
+    // Integrations (Google Calendar / Gmail / GitHub — executed in Python)
+    case calendarCreateEvent = "calendar_create_event"
+    case gmailSend = "gmail_send"
+    case gmailUnread = "gmail_unread"
+    case githubNotifications = "github_notifications"
+
     /// Fallback for any action type Python adds before Swift is updated.
     /// Unknown actions are forwarded to the Python backend.
     case unknown = "unknown"

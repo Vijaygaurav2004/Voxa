@@ -15,12 +15,21 @@ final class ActionRouter {
         appLog("[Router] \(message)")
     }
 
-    private let speakResultActions: Set<ActionType> = [
+    /// Query actions whose result is spoken aloud automatically. Exposed so the
+    /// engine can avoid also speaking the plan confirmation (which would double up).
+    static let speakResultActions: Set<ActionType> = [
         .screenRead, .screenshot, .clipboardGet, .systemBattery,
         .listTimers, .calendarToday, .calendarUpcoming, .remindersList,
         .mediaNowPlaying, .chromeListTabs, .chromePageInfo,
-        .memoryQuery, .memorySummary
+        .memoryQuery, .memorySummary,
+        .calendarCreateEvent, .gmailUnread, .githubNotifications
     ]
+
+    /// True if the plan produces its own spoken output (a `speak` action or an
+    /// auto-spoken query result), so the confirmation should NOT also be spoken.
+    static func planSpeaksItsOwnResponse(_ plan: ActionPlan) -> Bool {
+        plan.actions.contains { $0.action == .speak || speakResultActions.contains($0.action) }
+    }
 
     /// Route and execute a complete ActionPlan.
     /// Swift-classified actions execute locally, Python ones go to the API.
@@ -46,7 +55,7 @@ final class ActionRouter {
             logMessage("   \(status) \(result.message ?? "Done")")
 
             // Auto-speak results for query actions
-            if speakResultActions.contains(action.action), result.success, let message = result.message {
+            if Self.speakResultActions.contains(action.action), result.success, let message = result.message {
                 logMessage("🗣️  Speaking result: \(message)")
                 try? await bridge.speak(text: message, blocking: false)
             }

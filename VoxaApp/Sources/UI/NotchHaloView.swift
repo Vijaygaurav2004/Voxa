@@ -121,7 +121,21 @@ struct NotchHaloView: View {
                         .shadow(color: state.stateColor.opacity(isActive ? 0.4 : 0.05), radius: 6)
                 }
 
-                if state.pipelineState == .listening {
+                if !state.liveTranscript.isEmpty {
+                    // Live transcript replaces the "Speak now" caption.
+                    Text(state.liveTranscript)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(state.transcriptIsFinal ? .primary : .secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .truncationMode(.head)          // newest words always visible
+                        .contentTransition(.interpolate)
+                        .frame(maxWidth: min(500, state.overlayWidth - 40))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        .animation(.easeOut(duration: 0.18), value: state.liveTranscript)
+                        .animation(.easeOut(duration: 0.25), value: state.transcriptIsFinal)
+                } else if state.pipelineState == .listening {
                     Text("Speak now")
                         .font(.system(.caption2, design: .rounded, weight: .semibold))
                         .foregroundStyle(.secondary)

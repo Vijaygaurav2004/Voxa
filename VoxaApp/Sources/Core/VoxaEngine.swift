@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import Combine
 import AVFoundation
 import Speech
@@ -19,6 +20,8 @@ final class VoxaEngine: ObservableObject {
 
     private var backendProcess: Process?
     private var voiceCapture: VoiceCapture?
+    private var meetingCapture: MeetingCapture?
+    private var systemAudioCapture: SystemAudioCapture?
     private var wakeWordListener: WakeWordListener?
     private var hotkeyManager: HotkeyManager?
     private var webSocketTask: URLSessionWebSocketTask?
@@ -73,6 +76,22 @@ final class VoxaEngine: ObservableObject {
         // Request permissions first
         await requestPermissionsIfNeeded()
 
+        // First-run onboarding (replaces the old blocking key alert).
+        if VoxaConfig.readAPIKey() == nil {
+            // No key yet — the onboarding's key step must complete before the
+            // backend can start. Suspends until a key is saved (or the user quits).
+            let ok = await OnboardingManager.shared.runFirstLaunch(requireKey: true)
+            guard ok, VoxaConfig.readAPIKey() != nil else {
+                logMessage("Onboarding closed without an API key — quitting.")
+                NSApplication.shared.terminate(nil)
+                return
+            }
+        } else if !OnboardingManager.shared.isComplete {
+            // Key already present (dev .env, or a future embedded key) — show the
+            // friendly first-run onboarding non-blocking; backend starts normally.
+            OnboardingManager.shared.presentFirstLaunch(requireKey: false)
+        }
+
         // 1. Check if Python backend is already running
         let alreadyRunning = await bridge.healthCheck()
         if alreadyRunning {
@@ -120,6 +139,10 @@ final class VoxaEngine: ObservableObject {
 
     func stop() {
         isRunning = false
+        meetingCapture?.stop()
+        meetingCapture = nil
+        systemAudioCapture?.stop()
+        systemAudioCapture = nil
         wakeWordListener?.stop()
         hotkeyManager?.stop()
         disconnectWebSocket()
@@ -147,10 +170,14 @@ final class VoxaEngine: ObservableObject {
             logMessage("💡 Parsed plan: \(plan.confirmation) with \(plan.actions.count) actions")
  
             state.setState(.executing, message: plan.confirmation)
- 
-            // Speak confirmation voice response
-            try? await bridge.speak(text: plan.confirmation, blocking: false)
- 
+
+            // Speak the confirmation — but ONLY if the plan doesn't produce its own
+            // spoken response (a `speak` action or an auto-spoken query result).
+            // Otherwise the user hears two overlapping answers (e.g. "how are you").
+            if !ActionRouter.planSpeaksItsOwnResponse(plan) {
+                try? await bridge.speak(text: plan.confirmation, blocking: false)
+            }
+
             // Execute via router — Swift actions locally, Python via API
             let results = await router.executePlan(plan)
  
@@ -183,6 +210,8 @@ final class VoxaEngine: ObservableObject {
             // "Hey Voxa open Chrome" — show orb instantly, then process
             logMessage("🎯 Wake word + inline command: \"\(command)\"")
             state.setState(.listening, message: "Hey Voxa")
+            // No recording happens for inline commands — still show what was heard.
+            state.setTranscript(command, final: true)
             await processCommand(command)
         } else {
             // "Hey Voxa" alone — show orb INSTANTLY, play local chime, then listen
@@ -198,6 +227,12 @@ final class VoxaEngine: ObservableObject {
         wakeWordListener?.start()
     }
  
+    /// Public entry point to start a voice command manually (e.g. from the
+    /// menu-bar "Speak" button), mirroring the hotkey path.
+    func triggerVoiceCommand() async {
+        await handleHotkey()
+    }
+
     private func handleHotkey() async {
         logMessage("🔑 Hotkey ⌘+Shift+V activated!")
         // Stop wake word listener to avoid microphone resource sharing conflicts
@@ -215,19 +250,31 @@ final class VoxaEngine: ObservableObject {
             state.setState(.listening)
         }
 
+        // Start of listening — clear any stale transcript, then stream live
+        // display-only partials (on-device SFSpeechRecognizer) into the overlay.
+        state.setTranscript("", final: false)
+        capture.onPartialTranscript = { text in
+            Task { @MainActor in
+                VoxaState.shared.setTranscript(text, final: false)
+            }
+        }
+
         // Record audio
         guard let audioData = await capture.recordUntilSilence() else {
             state.setState(.idle, message: "No speech detected")
             return
         }
- 
+
         // Transcribe via Python Whisper
         state.setState(.transcribing)
- 
+
         do {
             let text = try await bridge.transcribe(audioData: audioData)
             logMessage("📝 Transcribed: \"\(text)\"")
- 
+
+            // Whisper's final text replaces the live partial (locks in).
+            state.setTranscript(text, final: true)
+
             // Strip wake word if present
             var command = text
             let lowerText = text.lowercased()
@@ -253,20 +300,48 @@ final class VoxaEngine: ObservableObject {
     // MARK: - Python Backend Process Management
  
     private func launchBackend() {
-        let python = config.pythonPath
-        let projectRoot = config.projectRoot
- 
-        guard FileManager.default.fileExists(atPath: python.path) else {
-            logMessage("❌ Python venv not found at \(python.path)")
-            return
-        }
- 
         let process = Process()
-        process.executableURL = python
-        process.arguments = ["-m", "voxa.main", "--server"]
-        process.currentDirectoryURL = projectRoot
-        process.environment = ProcessInfo.processInfo.environment
- 
+
+        // Inject config + the user's API key into the backend's environment.
+        var environment = ProcessInfo.processInfo.environment
+        if let key = VoxaConfig.readAPIKey() {
+            environment["OPENAI_API_KEY"] = key
+        }
+        environment["VOXA_BRIDGE_TOKEN"] = VoxaConfig.bridgeToken()
+        environment["API_SERVER_HOST"] = config.apiServerHost
+        environment["API_SERVER_PORT"] = String(config.apiServerPort)
+        environment["PYTHONUNBUFFERED"] = "1"
+
+        // DMG-embedded credentials (OAuth client ids/secrets, OpenAI key fallback)
+        // so a downloaded app works out of the box. Only fill what the environment
+        // doesn't already provide — real env / ~/.voxa/.env always take precedence.
+        for (k, v) in VoxaConfig.embeddedDefaults where (environment[k]?.isEmpty ?? true) {
+            environment[k] = v
+        }
+
+        if let backend = config.embeddedBackendURL {
+            // ── Distributed app: launch the self-contained bundled backend ──
+            logMessage("📦 Launching embedded backend: \(backend.path)")
+            // Ensure ~/.voxa exists — it's the working dir, and it may not have
+            // been created yet if the key came from an env var (no key prompt).
+            try? FileManager.default.createDirectory(
+                at: VoxaConfig.userConfigDir, withIntermediateDirectories: true)
+            process.executableURL = backend
+            process.arguments = ["--server"]
+            process.currentDirectoryURL = VoxaConfig.userConfigDir
+        } else {
+            // ── Developer checkout: launch via the project venv ──
+            let python = config.pythonPath
+            guard FileManager.default.fileExists(atPath: python.path) else {
+                logMessage("❌ No embedded backend and Python venv not found at \(python.path)")
+                return
+            }
+            process.executableURL = python
+            process.arguments = ["-m", "voxa.main", "--server"]
+            process.currentDirectoryURL = config.projectRoot
+        }
+        process.environment = environment
+
         // Pipe stdout/stderr for logging
         let pipe = Pipe()
         process.standardOutput = pipe
@@ -311,12 +386,15 @@ final class VoxaEngine: ObservableObject {
         // Cancel any existing task first to prevent duplicate active listeners
         webSocketTask?.cancel(with: .goingAway, reason: nil)
 
-        let url = config.wsURL
-        let task = URLSession.shared.webSocketTask(with: url)
+        // Authenticate the socket with the shared bridge token via header —
+        // never in the URL, so it can't end up in request logs.
+        var request = URLRequest(url: config.wsURL)
+        request.setValue(VoxaConfig.bridgeToken(), forHTTPHeaderField: "X-Voxa-Token")
+        let task = URLSession.shared.webSocketTask(with: request)
         self.webSocketTask = task
         task.resume()
         listenWebSocket()
-        print("🔌 WebSocket connecting to \(url)...")
+        print("🔌 WebSocket connecting to \(config.wsURL)...")
     }
 
     private func listenWebSocket() {
@@ -327,7 +405,7 @@ final class VoxaEngine: ObservableObject {
                 case .success(let message):
                     switch message {
                     case .string(let text):
-                        print("💬 WebSocket received event: \(text)")
+                        self.handleWebSocketEvent(text)
                     case .data(let data):
                         print("💬 WebSocket received binary data: \(data.count) bytes")
                     @unknown default:
@@ -344,6 +422,117 @@ final class VoxaEngine: ObservableObject {
                 }
             }
         }
+    }
+
+    // MARK: - WebSocket Events
+
+    /// Handle a real-time event pushed from the backend over the WebSocket.
+    private func handleWebSocketEvent(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let event = obj["event"] as? String else { return }
+        let payload = obj["data"] as? [String: Any] ?? [:]
+
+        switch event {
+        case "meeting_detected":
+            let platform = (payload["platform"] as? String) ?? "meeting"
+            promptRecordMeeting(platform: platform)
+        case "meeting_recording":
+            MeetingPromptManager.shared.hide()
+            let platform = (payload["platform"] as? String) ?? "meeting"
+            // Backend asked us to stream mic audio (it can't reliably access it).
+            if (payload["external_audio"] as? Bool) ?? false {
+                let systemAudio = (payload["capture_system_audio"] as? Bool) ?? false
+                startMeetingCapture(captureSystemAudio: systemAudio)
+            }
+            // Brief, self-dismissing confirmation — NOT a persistent state, so the
+            // orb doesn't animate for the whole meeting.
+            state.setState(.done, message: "Recording \(platform)…")
+        case "meeting_paused":
+            meetingCapture?.pause()
+            systemAudioCapture?.pause()
+        case "meeting_resumed":
+            meetingCapture?.resume()
+            systemAudioCapture?.resume()
+        case "meeting_suggestion":
+            let id = (payload["id"] as? String) ?? ""
+            let title = (payload["title"] as? String) ?? "New event"
+            let whenText = (payload["when_text"] as? String) ?? ""
+            guard !id.isEmpty else { break }
+            SuggestionPromptManager.shared.show(
+                id: id, title: title, whenText: whenText,
+                onAdd: { [weak self] in
+                    Task { @MainActor in
+                        _ = try? await self?.bridge.confirmSuggestion(id: id, accept: true)
+                        self?.state.setState(.done, message: "Added to calendar")
+                    }
+                },
+                onDismiss: { [weak self] in
+                    Task { @MainActor in
+                        _ = try? await self?.bridge.confirmSuggestion(id: id, accept: false)
+                    }
+                }
+            )
+        case "meeting_ended", "meeting_dismissed":
+            MeetingPromptManager.shared.hide()
+            SuggestionPromptManager.shared.clearAll()
+            stopMeetingCapture()
+            // Make sure the overlay/animation returns to idle.
+            state.setState(.idle, message: "Ready")
+        case "integration_connected", "integration_disconnected":
+            // Let any open Accounts page refresh its provider list.
+            NotificationCenter.default.post(name: .voxaIntegrationsChanged, object: nil)
+        default:
+            break
+        }
+    }
+
+    private func startMeetingCapture(captureSystemAudio: Bool) {
+        // Free the microphone for meeting capture: the wake-word listener holds
+        // its own AVAudioEngine on the input, and two engines contend — which is
+        // why meeting audio came back empty. Pause it for the duration.
+        wakeWordListener?.stop()
+
+        if meetingCapture == nil { meetingCapture = MeetingCapture() }
+        meetingCapture?.start()
+        if captureSystemAudio {
+            if systemAudioCapture == nil { systemAudioCapture = SystemAudioCapture() }
+            systemAudioCapture?.start()   // captures the other participants
+        }
+        logMessage("🎙️ Streaming meeting audio to backend (system audio: \(captureSystemAudio))")
+    }
+
+    private func stopMeetingCapture() {
+        meetingCapture?.stop()
+        meetingCapture = nil
+        systemAudioCapture?.stop()
+        systemAudioCapture = nil
+        // Resume wake-word listening now that the mic is free again.
+        if isRunning {
+            wakeWordListener?.start()
+        }
+    }
+
+    /// Show a minimal, non-intrusive pill asking whether to record the detected
+    /// meeting; report the answer. Does not steal focus from the meeting.
+    private func promptRecordMeeting(platform: String) {
+        MeetingPromptManager.shared.show(
+            platform: platform,
+            onRecord: { [weak self] in
+                // Capture + the brief indicator are driven by the meeting_recording
+                // event so the orb doesn't stay animating for the whole meeting.
+                Task {
+                    try? await PythonBridge.shared.confirmMeeting(record: true)
+                    self?.logMessage("🎙️ User agreed to record meeting")
+                }
+            },
+            onDismiss: { [weak self] in
+                Task {
+                    try? await PythonBridge.shared.confirmMeeting(record: false)
+                    self?.logMessage("🙅 User declined meeting recording")
+                }
+            }
+        )
     }
 
     private func disconnectWebSocket() {

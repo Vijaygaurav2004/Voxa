@@ -33,21 +33,39 @@ final class VoxaState: ObservableObject {
     }
     @Published var notchRect: NSRect? = nil
 
+    // Live transcription (Siri-style, display-only partials)
+    @Published var liveTranscript: String = ""
+    @Published var transcriptIsFinal: Bool = false
+
     var overlayWidth: CGFloat {
         if useNotchHalo {
             let notchW = notchRect?.width ?? 180
             return notchW + 180
         } else {
-            return 260
+            return 460
         }
     }
 
     var overlayHeight: CGFloat {
         if useNotchHalo {
             let notchH = notchRect?.height ?? 32
-            return notchH + 120
+            return notchH + 176
         } else {
-            return 280
+            return 340
+        }
+    }
+
+    /// Update the live transcript shown in the overlay.
+    /// Interim (partial) text renders dimmed; final text "locks in".
+    func setTranscript(_ text: String, final: Bool) {
+        // Once a final transcript is locked in (Whisper's result), ignore any
+        // late interim partials that a just-cancelled SFSpeech task may still
+        // deliver — they'd otherwise revert the text to dimmed interim state.
+        // A fresh listening cycle clears via setTranscript("", final: false).
+        if transcriptIsFinal && !final && !text.isEmpty { return }
+        withAnimation(.easeOut(duration: 0.18)) {
+            liveTranscript = text
+            transcriptIsFinal = final
         }
     }
 
@@ -84,6 +102,11 @@ final class VoxaState: ObservableObject {
     }
 
     func setState(_ state: PipelineState, message: String? = nil) {
+        // Wipe the live transcript whenever we return to idle (auto-reset path).
+        if state == .idle {
+            liveTranscript = ""
+            transcriptIsFinal = false
+        }
         withAnimation(.easeInOut(duration: 0.2)) {
             self.pipelineState = state
             if let message = message {

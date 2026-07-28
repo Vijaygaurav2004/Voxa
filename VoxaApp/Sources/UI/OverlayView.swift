@@ -56,9 +56,29 @@ struct OverlayView: View {
 
                 Spacer(minLength: 10)
 
-                // — Status pill —
-                statusLabel
-                    .padding(.bottom, 28)
+                // — Live transcript (Siri-style) —
+                // Shown in place of the status capsule to avoid duplication;
+                // the capsule returns once the transcript is empty again.
+                if !state.liveTranscript.isEmpty {
+                    Text(state.liveTranscript)
+                        .font(.system(size: 17, weight: .medium, design: .rounded))
+                        .foregroundStyle(state.transcriptIsFinal ? .primary : .secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(3)
+                        .truncationMode(.head)          // newest words always visible
+                        .contentTransition(.interpolate)
+                        .frame(maxWidth: 380)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .transition(.opacity.combined(with: .move(edge: .bottom)))
+                        .animation(.easeOut(duration: 0.18), value: state.liveTranscript)
+                        .animation(.easeOut(duration: 0.25), value: state.transcriptIsFinal)
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 26)
+                } else {
+                    // — Status pill —
+                    statusLabel
+                        .padding(.bottom, 28)
+                }
             }
         }
     }

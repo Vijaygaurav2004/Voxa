@@ -41,6 +41,9 @@ SPEAK_RESULT_ACTIONS = {
     ActionType.EMAIL_COMPOSE,
     ActionType.MEMORY_QUERY,
     ActionType.MEMORY_SUMMARY,
+    ActionType.CALENDAR_CREATE_EVENT,
+    ActionType.GMAIL_UNREAD,
+    ActionType.GITHUB_NOTIFICATIONS,
 }
 
 
@@ -310,6 +313,72 @@ def execute_action(action: Action) -> dict:
                 subject=action.email_subject,
                 body=action.email_body,
             )
+
+        # ── Integrations: Google Calendar / Gmail / GitHub ───────────────
+        elif action_type == ActionType.CALENDAR_CREATE_EVENT:
+            from voxa.integrations import google_client
+            result = google_client.create_calendar_event(
+                title=action.event_title or action.description,
+                start_iso=action.event_start or "",
+                end_iso=action.event_end or "",
+                description=action.event_description or "",
+                location=action.event_location or "",
+                attendees=action.event_attendees,
+            )
+            if not result.get("success") and result.get("not_connected"):
+                # Not connected — open a prefilled Google Calendar template instead
+                import urllib.parse
+                from datetime import datetime as _dt
+
+                def _template_stamp(iso: str) -> str:
+                    # Normalize any ISO form (incl. offsets/Z) to naive local YYYYMMDDTHHMMSS
+                    try:
+                        return _dt.fromisoformat(iso.replace("Z", "+00:00")).strftime("%Y%m%dT%H%M%S")
+                    except ValueError:
+                        return iso.replace("-", "").replace(":", "")
+
+                dates = ""
+                if action.event_start and action.event_end:
+                    dates = f"{_template_stamp(action.event_start)}/{_template_stamp(action.event_end)}"
+                params = {"action": "TEMPLATE", "text": action.event_title or action.description}
+                if dates:
+                    params["dates"] = dates
+                if action.event_description:
+                    params["details"] = action.event_description
+                if action.event_location:
+                    params["location"] = action.event_location
+                url = "https://calendar.google.com/calendar/render?" + urllib.parse.urlencode(params)
+                browser.open_url(url)
+                return {
+                    "success": True,
+                    "action": "calendar_create_event",
+                    "message": "I opened a prefilled event in your browser — connect Google Calendar in Voxa for one-tap adds.",
+                }
+            return result
+
+        elif action_type == ActionType.GMAIL_SEND:
+            from voxa.integrations import google_client
+            result = google_client.send_gmail(
+                to=action.email_to or "",
+                subject=action.email_subject or "",
+                body=action.email_body or "",
+            )
+            if not result.get("success") and result.get("not_connected"):
+                # Not connected — fall back to opening a compose window
+                return email_action.compose_email(
+                    to=action.email_to,
+                    subject=action.email_subject,
+                    body=action.email_body,
+                )
+            return result
+
+        elif action_type == ActionType.GMAIL_UNREAD:
+            from voxa.integrations import google_client
+            return google_client.get_unread_summary()
+
+        elif action_type == ActionType.GITHUB_NOTIFICATIONS:
+            from voxa.integrations import github_client
+            return github_client.get_notifications_summary()
 
         # ── Computer / Mouse / UI Control ────────────────────────────────────
         elif action_type == ActionType.VISION_CLICK:

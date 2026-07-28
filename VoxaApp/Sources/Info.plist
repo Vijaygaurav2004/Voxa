@@ -13,7 +13,7 @@
     <key>CFBundleShortVersionString</key>
     <string>1.0</string>
     <key>LSUIElement</key>
-    <true/>
+    <false/>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Voxa requires speech recognition to transcribe voice commands.</string>
     <key>NSMicrophoneUsageDescription</key>

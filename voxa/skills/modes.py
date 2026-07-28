@@ -22,6 +22,26 @@ log = get_logger("modes")
 MODES_DIR = Path.home() / ".voxa"
 MODES_FILE = MODES_DIR / "modes.json"
 
+# Detects natural-language "create a mode" commands, e.g.
+#   "create a work mode that opens VS Code and turns on do not disturb"
+#   "make me a focus mode", "set up a study mode", "define a gaming mode"
+_CREATE_MODE_RE = re.compile(
+    r'\b(create|make|set\s?up|build|define|configure|design|new)\b'
+    r'.{0,40}?\bmode\b',
+    re.IGNORECASE,
+)
+
+# Built-in macOS / device "modes" that are NOT user-defined Voxa modes. When the
+# user names one of these, they want to toggle a system feature (handled by the
+# normal intent parser), not define a custom automation mode.
+_SYSTEM_MODE_RE = re.compile(
+    r'\b(dark|light|night|airplane|aeroplane|sleep|standby|safe|silent|'
+    r'incognito|private|'
+    r'low[\s-]?power|power[\s-]?saving|battery[\s-]?saver|'
+    r'full[\s-]?screen|do not disturb|dnd)\s+mode\b',
+    re.IGNORECASE,
+)
+
 
 class Mode:
     """Represents a single user-defined mode."""
@@ -114,12 +134,27 @@ class ModeManager:
     # ── CRUD ──────────────────────────────────────────────────────────────────
 
     def _parse_instructions(self, instructions: list[str]) -> list[dict]:
-        """Parse plain English instructions into structured actions using the LLM."""
+        """
+        Parse plain English instructions into structured actions using the LLM.
+
+        Each instruction is an independent LLM call, so they are compiled
+        concurrently (order preserved) instead of serially — a 5-step mode goes
+        from ~5 round-trips of latency down to ~1.
+        """
+        from concurrent.futures import ThreadPoolExecutor
         from voxa.intelligence.intent_parser import parse_intent_with_retry
-        
+
+        if not instructions:
+            return []
+
+        # ThreadPoolExecutor.map preserves input order; the OpenAI client is
+        # safe to call from multiple threads.
+        max_workers = min(len(instructions), 5)
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            plans = list(ex.map(parse_intent_with_retry, instructions))
+
         all_actions = []
-        for inst in instructions:
-            plan = parse_intent_with_retry(inst)
+        for plan in plans:
             if plan and plan.actions:
                 for a in plan.actions:
                     a_dict = {"action": a.action.value, **{k: v for k, v in a.model_dump().items() if v is not None and k != "action"}}
@@ -277,16 +312,108 @@ class ModeManager:
     def mode_count(self) -> int:
         return len(self.modes)
 
+    # ── Small/Fast LLM helper ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _fast_llm_json(
+        system: str,
+        user: str,
+        temperature: float = 0.0,
+        max_tokens: int = 60,
+    ) -> dict | None:
+        """
+        Call the small/fast LLM (config.LLM_MODEL_FAST, e.g. gpt-4o-mini) with a
+        JSON-only response format and return the parsed object.
+
+        This is the shared entry point for all the "cheap intelligence" that Voxa
+        uses to understand vague prompts: matching a fuzzy phrase to an existing
+        mode, and building a brand-new mode from a plain English description.
+
+        Returns the parsed dict, or None on any failure (missing key, API error,
+        malformed JSON).
+        """
+        try:
+            from openai import OpenAI
+            from voxa.config import config
+
+            api_key = config.OPENAI_API_KEY
+            if not api_key:
+                return None
+
+            client = OpenAI(api_key=api_key)
+            response = client.chat.completions.create(
+                model=config.LLM_MODEL_FAST,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                temperature=temperature,
+                response_format={"type": "json_object"},
+                max_tokens=max_tokens,
+            )
+            content = response.choices[0].message.content or ""
+            return json.loads(content)
+        except Exception as e:
+            log.warning("Fast LLM JSON call failed: %s", e)
+            return None
+
     # ── Trigger Matching ──────────────────────────────────────────────────────
 
-    def match_mode(self, user_input: str) -> Mode | None:
+    def _match_mode_with_llm(self, user_input: str) -> Mode | None:
+        """
+        Use small/fast LLM (config.LLM_MODEL_FAST e.g. gpt-4o-mini) to match
+        vague user prompts (e.g. "I want to focus now", "time to relax") to custom modes.
+        """
+        if not self.modes:
+            return None
+
+        modes_info = []
+        for m in self.modes:
+            inst_str = ", ".join(m.instructions[:3])
+            modes_info.append(f'- Mode Name: "{m.name}" | Trigger: "{m.trigger}" | Description: "{m.description}" | Steps: [{inst_str}]')
+
+        prompt = (
+            "You are an intent classifier for system modes.\n"
+            "The user has defined the following custom modes:\n"
+            + "\n".join(modes_info) + "\n\n"
+            f'User prompt: "{user_input}"\n\n'
+            "Task: Decide if the user prompt is vaguely or explicitly describing an intent to activate or switch to one of the custom modes listed above.\n"
+            "Examples:\n"
+            "- Prompt: 'I need to focus and write code' -> matches 'Work Mode'\n"
+            "- Prompt: 'Time to chill and play music' -> matches 'Chill Mode'\n"
+            "- Prompt: 'Getting ready for study' -> matches 'Study Mode'\n\n"
+            "Return a JSON object:\n"
+            '{"match": true, "trigger": "<trigger_or_name>"}\n'
+            "or if it does not match any mode:\n"
+            '{"match": false, "trigger": null}'
+        )
+
+        data = self._fast_llm_json(
+            system="You are a fast intent classifier. Return valid JSON only.",
+            user=prompt,
+            temperature=0.0,
+            max_tokens=60,
+        )
+        if data and data.get("match") and data.get("trigger"):
+            trig = str(data["trigger"]).lower().strip()
+            matched = self._find_by_trigger(trig)
+            if matched:
+                log.info("🧠 Small LLM matched vague prompt '%s' -> mode '%s'", user_input, matched.name)
+                return matched
+
+        return None
+
+    def match_mode(self, user_input: str, allow_llm: bool = True) -> Mode | None:
         """
         Check if user input matches any mode trigger.
-        Matching is case-insensitive. Supports exact match and common
-        activation phrases like "activate X", "switch to X", "enable X".
+        Matching is case-insensitive. Supports:
+        1. Exact match & activation prefixes ("activate X", "switch to X")
+        2. Levenshtein fuzzy distance matching
+        3. Small LLM intent classification for vague prompts ("I want to focus now" -> Work Mode)
 
         Args:
             user_input: The raw user command string.
+            allow_llm: Whether to use fast LLM fallback for vague intent matching.
 
         Returns:
             Matched Mode, or None.
@@ -315,7 +442,138 @@ class ModeManager:
                 if matched:
                     return matched
 
+        # Fast LLM intent matching for vague prompts
+        if allow_llm and self.modes:
+            matched_llm = self._match_mode_with_llm(user_input)
+            if matched_llm:
+                return matched_llm
+
         return None
+
+    # ── Natural-language Creation ─────────────────────────────────────────────
+
+    def is_create_mode_command(self, user_input: str) -> bool:
+        """
+        Heuristic check for whether the user is asking to CREATE / DEFINE a new
+        mode from a plain-English description (as opposed to activating one).
+
+        Matches: "create a work mode that...", "make me a focus mode",
+                 "set up a study mode", "build a gaming mode".
+        Does NOT match pure activation phrases like "switch to work mode".
+        """
+        lower = user_input.lower().strip()
+        if "mode" not in lower:
+            return False
+        # Don't hijack commands about built-in system modes (dark mode, sleep
+        # mode, do not disturb mode…) — those are toggles, not custom modes.
+        if _SYSTEM_MODE_RE.search(lower):
+            return False
+        return bool(_CREATE_MODE_RE.search(lower))
+
+    # Capabilities summary given to the small LLM so it only proposes feasible steps.
+    _CAPABILITY_HINT = (
+        "Voxa can, per instruction: open or close any macOS app; open URLs and "
+        "search/play on the web (Google, YouTube, Netflix, Maps); control Chrome "
+        "tabs and windows; set system volume, brightness, dark mode, Do Not Disturb; "
+        "control media playback (Spotify/Music); set timers; check calendar; send "
+        "WhatsApp messages and compose email; run shell commands; and speak to the user. "
+        "Connected integrations MAY also exist: create Google Calendar events, send "
+        "Gmail, and check GitHub notifications."
+    )
+
+    def generate_mode_spec(self, description: str) -> dict | None:
+        """
+        Use the small/fast LLM to turn a free-form description into a structured
+        mode spec WITHOUT saving it. Returns {name, description, instructions[]}
+        or None on failure.
+
+        This is the shared brain used by both the "create from voice" path and the
+        UI "✨ generate" button (which lets the user review/edit before saving).
+        """
+        system = (
+            "You design custom automation 'modes' for Voxa, a hands-free macOS "
+            "voice assistant. The user describes, in plain English, a mode they want. "
+            "Convert it into a concrete, executable mode.\n\n"
+            + self._CAPABILITY_HINT + "\n\n"
+            "Return ONLY a JSON object:\n"
+            '{"name": "<Short Mode Name>", "description": "<one friendly sentence>", '
+            '"instructions": ["<single imperative command>", "..."]}\n\n'
+            "Rules:\n"
+            "- name: 1-3 words, Title Case, ending in 'Mode' (e.g. 'Work Mode').\n"
+            "- instructions: each is ONE atomic command phrased exactly as the user "
+            "would speak it to Voxa (e.g. 'Open Visual Studio Code', 'Turn on Do Not "
+            "Disturb', 'Set brightness to 100%', 'Play lofi beats on YouTube'). Keep "
+            "each step to a single action.\n"
+            "- If the description is vague (e.g. 'make a focus mode'), infer 3-5 "
+            "sensible steps that fit the theme.\n"
+            "- Only propose steps within Voxa's listed capabilities."
+        )
+        user = f'User request: "{description}"'
+
+        data = self._fast_llm_json(system=system, user=user, temperature=0.3, max_tokens=500)
+        if not data:
+            return None
+
+        name = str(data.get("name") or "").strip() or "Custom Mode"
+        desc = str(data.get("description") or "").strip()
+        instructions = [str(i).strip() for i in (data.get("instructions") or []) if str(i).strip()]
+        if not instructions:
+            return None
+
+        log.info(
+            "🪄 Small LLM built mode spec '%s' from '%s' — %d step(s): %s",
+            name, description, len(instructions), instructions,
+        )
+        return {"name": name, "description": desc, "instructions": instructions}
+
+    def create_mode_from_description(self, description: str) -> dict:
+        """
+        Turn a free-form natural-language description into a fully-formed custom
+        mode using the small/fast LLM, then create (or update) it.
+
+        The small LLM extracts:
+          - a short mode name (e.g. "Work Mode")
+          - a friendly one-line description
+          - a list of atomic, plain-English instructions Voxa can execute
+
+        Works for both explicit descriptions ("create a work mode that opens VS
+        Code, turns on do not disturb and sets brightness to full") and vague ones
+        ("make me a focus mode"), where the LLM infers sensible default actions.
+
+        Args:
+            description: The raw user command describing the desired mode.
+
+        Returns:
+            Result dict with success status and message (same shape as create_mode).
+        """
+        spec = self.generate_mode_spec(description)
+        if not spec:
+            return {
+                "success": False,
+                "message": "I couldn't understand that mode description. Try naming a mode and what it should do.",
+            }
+
+        name = spec["name"]
+        desc = spec["description"]
+        instructions = spec["instructions"]
+
+        # Never silently clobber an existing mode's carefully-built steps. If one
+        # with this name already exists, refuse and point the user at editing it.
+        existing = self._find_by_trigger(name.lower().strip())
+        if existing:
+            return {
+                "success": False,
+                "message": (
+                    f"A mode called '{existing.name}' already exists. "
+                    f"Say 'edit {existing.name}' to change it, or delete it first."
+                ),
+                "created": False,
+                "mode": existing.to_dict(),
+            }
+
+        result = self.create_mode(name=name, instructions=instructions, description=desc)
+        result["created"] = result.get("success", False)
+        return result
 
     # ── Activation ────────────────────────────────────────────────────────────
 

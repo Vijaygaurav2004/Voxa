@@ -21,3 +21,10 @@ improvements.txt
 
 # Builds
 builds/
+
+# PyInstaller backend build artifacts
+backend_dist/
+backend_work/
+
+# Embedded build credentials (never commit)
+voxa-defaults.env
