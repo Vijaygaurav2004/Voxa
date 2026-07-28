@@ -1,5 +1,6 @@
 import Foundation
 import AVFoundation
+import Speech
 
 /// Native macOS voice capture using AVAudioEngine.
 /// Replaces Python's sounddevice + webrtcvad approach with Apple's native audio APIs.
@@ -7,6 +8,16 @@ import AVFoundation
 final class VoiceCapture {
     private var audioEngine: AVAudioEngine?
     private var isRecording = false
+
+    /// Called on the main queue with each live (display-only) partial transcript.
+    /// Whisper remains the source of truth for the final command text.
+    var onPartialTranscript: ((String) -> Void)?
+
+    // Live on-device partial transcription (SFSpeechRecognizer), fed from the
+    // SAME AVAudioEngine tap — never a second engine or tap.
+    private var speechRecognizer: SFSpeechRecognizer?
+    private var speechRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var speechTask: SFSpeechRecognitionTask?
 
     // Audio format: 16kHz mono Int16 (matches Whisper API input)
     private let targetSampleRate: Double = 16000.0
@@ -79,6 +90,10 @@ final class VoiceCapture {
         inputNode.installTap(onBus: 0, bufferSize: bufferSize, format: inputFormat) { [weak self] buffer, time in
             guard let self = self, self.isRecording else { return }
 
+            // Feed live on-device recognition (safe from the render thread).
+            // No-op until the request is created / when speech partials are unavailable.
+            self.speechRequest?.append(buffer)
+
             totalFrames += 1
             if totalFrames >= maxFrames {
                 self.stopRecording(engine: engine, completion: completion, buffers: audioBuffers, speechDetected: speechDetected)
@@ -129,6 +144,8 @@ final class VoiceCapture {
         do {
             try engine.start()
             appLog("🎤 Listening... (AVAudioEngine, \(inputFormat.sampleRate)Hz)")
+            // Engine/tap setup succeeded — start display-only live partials.
+            startLiveRecognitionIfAvailable()
         } catch {
             appLog("❌ Audio engine start failed: \(error)")
             isRecording = false
@@ -136,9 +153,54 @@ final class VoiceCapture {
         }
     }
 
+    // MARK: - Live Partial Transcription (display-only)
+
+    /// Starts an on-device SFSpeechRecognizer stream fed from the existing tap.
+    /// Fully guarded: without permission/recognizer availability this is a no-op
+    /// and behavior is exactly the batch-only pipeline of today.
+    private func startLiveRecognitionIfAvailable() {
+        guard onPartialTranscript != nil else { return }
+        // Permission is requested at app start — only check here, never request.
+        guard SFSpeechRecognizer.authorizationStatus() == .authorized,
+              let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US")),
+              recognizer.isAvailable else {
+            return
+        }
+
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        if recognizer.supportsOnDeviceRecognition {
+            // Low latency and private; otherwise leave server-based.
+            request.requiresOnDeviceRecognition = true
+        }
+
+        speechRecognizer = recognizer
+        speechRequest = request
+        speechTask = recognizer.recognitionTask(with: request) { [weak self] result, error in
+            guard let self = self else { return }
+            // Errors are ignored silently — the feature degrades to batch-only.
+            guard error == nil, let result = result else { return }
+            let text = result.bestTranscription.formattedString
+            DispatchQueue.main.async {
+                self.onPartialTranscript?(text)
+            }
+        }
+    }
+
+    /// Ends the live recognition stream. Called from BOTH stop paths.
+    private func finishLiveRecognition() {
+        speechRequest?.endAudio()
+        speechTask?.cancel()
+        speechRequest = nil
+        speechTask = nil
+        speechRecognizer = nil
+    }
+
     private func stopRecording(engine: AVAudioEngine, completion: @escaping (Data?) -> Void, buffers: [Data], speechDetected: Bool) {
         guard isRecording else { return }
         isRecording = false
+
+        finishLiveRecognition()
 
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
@@ -176,6 +238,7 @@ final class VoiceCapture {
 
     func stop() {
         isRecording = false
+        finishLiveRecognition()
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil

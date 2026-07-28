@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from datetime import datetime
 # pyrefly: ignore [missing-import]
 from openai import OpenAI
 # pyrefly: ignore [missing-import]
@@ -130,6 +131,11 @@ class ActionType(str, Enum):
     MEMORY_STOP           = "memory_stop"             # Stop ambient listening memory
     MEMORY_QUERY          = "memory_query"            # Ask a question about past conversations
     MEMORY_SUMMARY        = "memory_summary"          # Summarize recent conversations
+    # ── Integrations (Google Calendar / Gmail / GitHub) ──────────────────
+    CALENDAR_CREATE_EVENT = "calendar_create_event"   # Create a Google Calendar event
+    GMAIL_SEND            = "gmail_send"              # Send an email via Gmail
+    GMAIL_UNREAD          = "gmail_unread"            # Summarize unread Gmail inbox
+    GITHUB_NOTIFICATIONS  = "github_notifications"    # Summarize GitHub notifications
 
 
 # ─── Action Classification ───────────────────────────────────────────────────────
@@ -188,6 +194,8 @@ PYTHON_ACTIONS = {
     ActionType.ACTIVATE_MODE,
     ActionType.MEMORY_START, ActionType.MEMORY_STOP,
     ActionType.MEMORY_QUERY, ActionType.MEMORY_SUMMARY,
+    ActionType.CALENDAR_CREATE_EVENT, ActionType.GMAIL_SEND,
+    ActionType.GMAIL_UNREAD, ActionType.GITHUB_NOTIFICATIONS,
 }
 
 
@@ -259,6 +267,13 @@ class Action(BaseModel):
     # Memory
     memory_question: Optional[str] = None  # Question about past conversations (for memory_query)
     hours: Optional[float] = None          # Time range for memory_summary (hours)
+    # Integrations (Google Calendar events)
+    event_title: Optional[str] = None       # Event title for calendar_create_event
+    event_start: Optional[str] = None       # ISO 8601 local start, e.g. 2026-07-23T15:00:00
+    event_end: Optional[str] = None         # ISO 8601 local end
+    event_location: Optional[str] = None    # Event location
+    event_description: Optional[str] = None # Event description/notes
+    event_attendees: Optional[List[str]] = None  # Attendee email addresses
 
     def model_post_init(self, __context):
         """Auto-classify execution_target if not explicitly set."""
@@ -440,6 +455,14 @@ You can:
 | email_compose | email_to, email_subject, email_body | Compose email |
 | speak | text | Say something to the user |
 
+### Connected Integrations (Google Calendar, Gmail, GitHub)
+| Action | Required Fields | Description |
+|--------|----------------|-------------|
+| calendar_create_event | event_title, event_start, event_end (ISO 8601 local, e.g. 2026-07-23T15:00:00); optional event_location, event_description, event_attendees (emails) | Create a Google Calendar event. Use for "schedule a meeting", "add to my calendar", "book time". Infer a 1-hour duration when no end is given. |
+| gmail_send | email_to, email_subject, email_body | SEND an email via the user's Gmail (no compose window). Use when the user says "send an email", not just "draft". Write the full body. |
+| gmail_unread | - | Summarize unread emails in the Gmail inbox. Use for "any new emails?", "check my inbox". |
+| github_notifications | - | Summarize the user's GitHub notifications. Use for "any GitHub notifications?", "what's new on GitHub?". |
+
 ### Custom Modes
 | Action | Required Fields | Description |
 |--------|----------------|-------------|
@@ -610,11 +633,19 @@ You can:
 "Summarize today's meetings" → [{memory_summary: hours=24}]
 "What happened in the last hour?" → [{memory_summary: hours=1}]
 "Give me a recap of today" → [{memory_summary: hours=24}]
+(Calendar examples below assume today is Wednesday 2026-07-22 — ALWAYS resolve relative dates like "tomorrow" or "Friday" from the current date/time given in Context, and default to a 1-hour duration when no end time is stated.)
+"Schedule a meeting with Anantha tomorrow at 3pm" → [{calendar_create_event: event_title="Meeting with Anantha", event_start="2026-07-23T15:00:00", event_end="2026-07-23T16:00:00"}]
+"Add lunch with mom on Friday at noon at Olive Garden to my calendar" → [{calendar_create_event: event_title="Lunch with Mom", event_start="2026-07-24T12:00:00", event_end="2026-07-24T13:00:00", event_location="Olive Garden"}]
+"Send an email to john@example.com saying the demo is ready" → [{gmail_send: email_to="john@example.com", email_subject="Demo Ready", email_body="Hi John,\n\nJust letting you know the demo is ready. Let me know when you'd like to take a look.\n\nBest regards"}]
+"Do I have any unread emails?" → [{gmail_unread}]
+"Check my GitHub notifications" → [{github_notifications}]
 
 ## Context
 Default browser: Google Chrome. OS: macOS.
+{now_context}
 For follow-up commands like "close that" or "the next one", use conversation history to resolve references.
 {modes_context}
+{integrations_context}
 """
 
 
@@ -657,6 +688,18 @@ def parse_intent(
     except Exception:
         modes_context = ""
     system_prompt = SYSTEM_PROMPT.replace("{modes_context}", modes_context)
+
+    # Inject connected-integrations summary so the LLM knows what's available
+    try:
+        from voxa.integrations.oauth import integrations_context as get_integrations_context
+        integrations_context = get_integrations_context()
+    except Exception:
+        integrations_context = ""
+    system_prompt = system_prompt.replace("{integrations_context}", integrations_context)
+
+    # Current local time — required for resolving "tomorrow at 3pm" etc.
+    now_context = datetime.now().strftime("Current local date/time: %A, %Y-%m-%dT%H:%M:%S")
+    system_prompt = system_prompt.replace("{now_context}", now_context)
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -775,6 +818,15 @@ def is_simple_command(user_input: str) -> bool:
         "activate ", "switch to ", "enable ", "enter mode", "mode ",
     ]
     lower = user_input.lower().strip()
+    # Integration ACTIONS (creating events, sending mail, checking inboxes) need
+    # careful field extraction — route to the full model. Bare app opens like
+    # "open Calendar" / "open Gmail" stay on the fast path.
+    _integration_phrases = (
+        "schedule", "add to my calendar", "calendar event", "on my calendar",
+        "send an email", "send email", "compose", "unread", "notification",
+    )
+    if any(k in lower for k in _integration_phrases):
+        return False
     # If command matches a simple pattern and has no "and" / "then", it's simple
     if any(lower.startswith(p) for p in simple_patterns):
         if " and " not in lower and " then " not in lower:

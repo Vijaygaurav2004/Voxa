@@ -73,6 +73,14 @@ struct Action: Codable, Identifiable {
     var memoryQuestion: String?
     var hours: Double?
 
+    // Integrations (Google Calendar events)
+    var eventTitle: String?
+    var eventStart: String?
+    var eventEnd: String?
+    var eventLocation: String?
+    var eventDescription: String?
+    var eventAttendees: [String]?
+
     enum CodingKeys: String, CodingKey {
         case action, app, url, query, text, keys, command, path
         case delaySeconds = "delay_seconds"
@@ -108,6 +116,12 @@ struct Action: Codable, Identifiable {
         case modeName = "mode_name"
         case memoryQuestion = "memory_question"
         case hours
+        case eventTitle = "event_title"
+        case eventStart = "event_start"
+        case eventEnd = "event_end"
+        case eventLocation = "event_location"
+        case eventDescription = "event_description"
+        case eventAttendees = "event_attendees"
     }
 
     /// Whether this action should execute in Swift (vs being sent to Python).

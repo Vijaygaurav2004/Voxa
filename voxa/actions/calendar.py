@@ -130,3 +130,50 @@ def get_reminders() -> dict:
     except AppleScriptError as e:
         log.error("Reminders query failed: %s", e)
         return {"success": False, "action": "reminders_list", "error": str(e), "message": "Could not access Reminders. Try opening the Reminders app first."}
+
+
+def _esc(s: str) -> str:
+    """Escape a Python string for safe embedding in an AppleScript string literal."""
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
+
+
+def create_reminder(title: str, notes: str = "", list_name: str = "") -> dict:
+    """Create a reminder in the macOS Reminders app.
+
+    Args:
+        title: The reminder's name (required).
+        notes: Optional body text (e.g. meeting/owner/due context).
+        list_name: Optional target list; omit to use the default list.
+
+    Returns:
+        A result dict with success/action/message (and error on failure).
+    """
+    title = (title or "").strip()
+    if not title:
+        return {"success": False, "action": "reminders_create", "message": "Nothing to add."}
+
+    log.info("🔔 Creating reminder: %s", title)
+
+    props = f'name:"{_esc(title)}"'
+    if notes:
+        props += f', body:"{_esc(notes)}"'
+    # `at list "X"` targets a named list; omitting it uses the user's default list
+    # (creating into a non-existent named list would error).
+    at_clause = f' at list "{_esc(list_name)}"' if list_name else ""
+    script = (
+        'tell application "Reminders"\n'
+        '    launch\n'
+        f'    make new reminder{at_clause} with properties {{{props}}}\n'
+        'end tell'
+    )
+    try:
+        run_applescript(script, timeout=15)
+        return {"success": True, "action": "reminders_create", "message": f"Added reminder: {title}"}
+    except AppleScriptError as e:
+        log.error("Create reminder failed: %s", e)
+        return {
+            "success": False,
+            "action": "reminders_create",
+            "error": str(e),
+            "message": "Could not add the reminder. Open the Reminders app and try again.",
+        }

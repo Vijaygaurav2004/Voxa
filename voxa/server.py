@@ -11,13 +11,15 @@ Port: 7430 (configurable via API_SERVER_PORT in .env)
 from __future__ import annotations
 
 import io
+import os
+import html as _html
 import json
 import time
 import asyncio
 from typing import Optional, List, Dict, Any
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response, HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -79,6 +81,11 @@ class ModeCreateRequest(BaseModel):
     description: str = ""
 
 
+class ModeDescribeRequest(BaseModel):
+    """Request body for creating a custom mode from a plain-English description."""
+    description: str
+
+
 class ModeUpdateRequest(BaseModel):
     """Request body for updating a custom mode."""
     instructions: list[str] | None = None
@@ -88,6 +95,10 @@ class ModeUpdateRequest(BaseModel):
 # ─── WebSocket Connections ───────────────────────────────────────────────────────
 
 _ws_connections: list[WebSocket] = []
+
+# The server's running event loop, captured at startup so background threads
+# (e.g. the meeting detector) can schedule WebSocket broadcasts thread-safely.
+_event_loop: "asyncio.AbstractEventLoop | None" = None
 
 
 async def broadcast_status(event: str, data: dict):
@@ -103,6 +114,50 @@ async def broadcast_status(event: str, data: dict):
         _ws_connections.remove(ws)
 
 
+def notify_clients_threadsafe(event: str, data: dict):
+    """Schedule a WebSocket broadcast from any thread (no-op if loop not ready)."""
+    loop = _event_loop
+    if loop is None:
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(broadcast_status(event, data), loop)
+    except Exception as e:
+        log.warning("Threadsafe notify failed: %s", e)
+
+
+def _auth_result_page(success: bool, detail: str = "") -> str:
+    """Small self-contained result page shown after an OAuth redirect."""
+    icon = "✓" if success else "✕"
+    title = "Connected" if success else "Connection failed"
+    # Escape — `detail` can carry attacker-controlled query params or exception text.
+    body = "You can close this tab and return to Voxa." if success else _html.escape(detail or "Please try again from Voxa.")
+    color = "#34d399" if success else "#f87171"
+    return f"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Voxa — {title}</title>
+<style>
+  body {{ margin: 0; display: flex; align-items: center; justify-content: center;
+         min-height: 100vh; background: #101014; color: #e7e7ea;
+         font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }}
+  .card {{ text-align: center; padding: 48px 56px; border-radius: 18px;
+          background: #1a1a20; border: 1px solid #2a2a32; }}
+  .icon {{ font-size: 44px; color: {color}; }}
+  h1 {{ font-size: 20px; font-weight: 600; margin: 16px 0 8px; }}
+  p {{ font-size: 14px; color: #9a9aa2; margin: 0; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="icon">{icon}</div>
+    <h1>{title}</h1>
+    <p>{body}</p>
+  </div>
+</body>
+</html>"""
+
+
 # ─── App Factory ─────────────────────────────────────────────────────────────────
 
 def create_api_server() -> FastAPI:
@@ -116,10 +171,44 @@ def create_api_server() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=["http://127.0.0.1", "http://localhost"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Bridge auth (shared-secret between the Swift app and this server) ──────
+    # When VOXA_BRIDGE_TOKEN is set (the app injects it at launch), every /api/
+    # request must carry it — except /api/health and the two OAuth callback
+    # pages, which the browser hits directly. Unset (dev CLI, tests) = no token
+    # required, but state-changing requests from foreign browser origins are
+    # still rejected (CSRF guard: browsers attach Origin, native clients don't).
+    _bridge_token = os.environ.get("VOXA_BRIDGE_TOKEN", "")
+    _AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/google/callback", "/api/auth/github/callback"}
+
+    def _is_local_origin(origin: str) -> bool:
+        try:
+            from urllib.parse import urlparse
+            return urlparse(origin).hostname in ("127.0.0.1", "localhost")
+        except Exception:
+            return False
+
+    @app.middleware("http")
+    async def _bridge_auth_middleware(request: Request, call_next):
+        path = request.url.path
+        method = request.method.upper()
+        if path.startswith("/api/") and method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin and not _is_local_origin(origin):
+                return JSONResponse(status_code=403, content={"detail": "forbidden origin"})
+        if (
+            _bridge_token
+            and method != "OPTIONS"  # let CORS preflights through to CORSMiddleware
+            and path.startswith("/api/")
+            and path not in _AUTH_EXEMPT_PATHS
+            and request.headers.get("X-Voxa-Token") != _bridge_token
+        ):
+            return JSONResponse(status_code=401, content={"detail": "unauthorized"})
+        return await call_next(request)
 
     # ── Lazy imports (avoid circular imports at module level) ──────────────────
     def _get_intent_parser():
@@ -197,13 +286,31 @@ def create_api_server() -> FastAPI:
         except Exception as e:
             log.warning("Skill matching in intent endpoint failed: %s", e)
 
+        # Check for natural-language mode CREATION before matching/activation.
+        # e.g. "create a work mode that opens VS Code and turns on do not disturb"
+        try:
+            from voxa.skills.modes import mode_manager
+            if mode_manager.is_create_mode_command(req.text):
+                loop = asyncio.get_running_loop()
+                result = await loop.run_in_executor(
+                    None, lambda: mode_manager.create_mode_from_description(req.text)
+                )
+                from voxa.intelligence.intent_parser import ActionPlan
+                msg = result.get("message", "Mode saved.")
+                # Nothing for the Swift app to execute — just speak the confirmation.
+                plan = ActionPlan(thought="Built a custom mode from the user's description.", actions=[], confirmation=msg)
+                elapsed = time.time() - start
+                return {"plan": plan.model_dump(), "elapsed_ms": int(elapsed * 1000)}
+        except Exception as e:
+            log.warning("Mode creation in intent endpoint failed: %s", e)
+
         # Check custom modes next
         try:
             from voxa.skills.modes import mode_manager
             matched_mode = mode_manager.match_mode(req.text)
             if matched_mode:
                 loop = asyncio.get_running_loop()
-                
+
                 # If the mode was created previously without pre-compiled actions, compile now and save
                 if not matched_mode.actions:
                     def _compile_and_save():
@@ -354,6 +461,24 @@ def create_api_server() -> FastAPI:
                 }
         except Exception as e:
             log.warning("Skill check error: %s", e)
+
+        # Check for natural-language mode CREATION before matching/activation.
+        try:
+            from voxa.skills.modes import mode_manager
+            if mode_manager.is_create_mode_command(req.text):
+                result = await loop.run_in_executor(
+                    None, lambda: mode_manager.create_mode_from_description(req.text)
+                )
+                elapsed = time.time() - start
+                return {
+                    "type": "mode_created",
+                    "success": result.get("success", False),
+                    "message": result.get("message", ""),
+                    "mode": result.get("mode"),
+                    "elapsed_ms": int(elapsed * 1000),
+                }
+        except Exception as e:
+            log.warning("Mode creation in command endpoint failed: %s", e)
 
         # Check custom modes next
         try:
@@ -558,6 +683,40 @@ def create_api_server() -> FastAPI:
             raise HTTPException(status_code=400, detail=result["message"])
         return result
 
+    @app.post("/api/modes/generate")
+    async def generate_mode_spec_endpoint(req: ModeDescribeRequest):
+        """
+        Preview a custom mode from a plain-English description WITHOUT saving it,
+        so the UI can let the user review/edit the generated steps before creating.
+        Returns {name, description, instructions}.
+        """
+        from voxa.skills.modes import mode_manager
+        loop = asyncio.get_running_loop()
+        spec = await loop.run_in_executor(
+            None, lambda: mode_manager.generate_mode_spec(req.description)
+        )
+        if not spec:
+            raise HTTPException(
+                status_code=422,
+                detail="Couldn't turn that into a mode. Try describing what it should do.",
+            )
+        return spec
+
+    @app.post("/api/modes/describe")
+    async def create_mode_from_description_endpoint(req: ModeDescribeRequest):
+        """
+        Build a custom mode from a plain-English description using the small/fast LLM.
+        e.g. {"description": "a work mode that opens VS Code and turns on do not disturb"}
+        """
+        from voxa.skills.modes import mode_manager
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(
+            None, lambda: mode_manager.create_mode_from_description(req.description)
+        )
+        if not result["success"]:
+            raise HTTPException(status_code=400, detail=result["message"])
+        return result
+
     @app.put("/api/modes/{name}")
     async def update_mode(name: str, req: ModeUpdateRequest):
         """Update an existing custom mode."""
@@ -640,6 +799,76 @@ def create_api_server() -> FastAPI:
             "memory_retention_days": config.MEMORY_RETENTION_DAYS,
         }
 
+    # ── Integrations (Google / GitHub connections) ────────────────────────────
+
+    @app.get("/api/integrations")
+    async def get_integrations():
+        """List integration providers with connection status (no tokens/secrets)."""
+        from voxa.integrations.oauth import provider_status
+        return provider_status()
+
+    @app.post("/api/integrations/{provider}/connect")
+    async def connect_integration(provider: str):
+        """Start an OAuth connect flow — returns the auth URL to open in a browser."""
+        from voxa.integrations.oauth import PROVIDERS, begin_connect
+        if provider not in PROVIDERS:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"Unknown provider '{provider}'"},
+            )
+        return begin_connect(provider)
+
+    @app.post("/api/integrations/{provider}/disconnect")
+    async def disconnect_integration(provider: str):
+        """Disconnect a provider (revokes/deletes tokens or disables the service)."""
+        from voxa.integrations.oauth import PROVIDERS, disconnect
+        if provider not in PROVIDERS:
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": f"Unknown provider '{provider}'"},
+            )
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: disconnect(provider))
+        await broadcast_status("integration_disconnected", {"provider": provider})
+        return result
+
+    @app.get("/api/auth/google/callback")
+    async def google_auth_callback(code: str = "", state: str = "", error: str = ""):
+        """OAuth loopback redirect target for Google — shown in the user's browser."""
+        from voxa.integrations.oauth import handle_google_callback
+        if error or not code:
+            return HTMLResponse(_auth_result_page(False, error or "Missing authorization code."), status_code=400)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: handle_google_callback(code, state))
+        if not result.get("success"):
+            return HTMLResponse(_auth_result_page(False, result.get("message", "")), status_code=400)
+        account = result.get("account") or {}
+        label = account.get("email", "")
+        if account.get("name") and label:
+            label = f"{account['name']} ({label})"
+        await broadcast_status("integration_connected", {
+            "provider": result.get("provider"),
+            "account_label": label,
+        })
+        return HTMLResponse(_auth_result_page(True))
+
+    @app.get("/api/auth/github/callback")
+    async def github_auth_callback(code: str = "", state: str = "", error: str = ""):
+        """OAuth loopback redirect target for GitHub — shown in the user's browser."""
+        from voxa.integrations.oauth import handle_github_callback
+        if error or not code:
+            return HTMLResponse(_auth_result_page(False, error or "Missing authorization code."), status_code=400)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: handle_github_callback(code, state))
+        if not result.get("success"):
+            return HTMLResponse(_auth_result_page(False, result.get("message", "")), status_code=400)
+        account = result.get("account") or {}
+        await broadcast_status("integration_connected", {
+            "provider": "github",
+            "account_label": account.get("login", ""),
+        })
+        return HTMLResponse(_auth_result_page(True))
+
     # ── Memory (Always-On Ambient Listening) ──────────────────────────────────
 
     @app.post("/api/memory/start")
@@ -669,6 +898,25 @@ def create_api_server() -> FastAPI:
         """Get memory engine status and statistics."""
         from voxa.memory.engine import memory_engine
         return memory_engine.status
+
+    @app.post("/api/memory/ingest")
+    async def memory_ingest(audio: UploadFile = File(...), source: str = Form("mic")):
+        """
+        Ingest an externally-captured audio chunk (WAV) from the host app. Used
+        when the engine runs in external-audio mode (e.g. meeting recording), so
+        audio is captured by the Swift app, which reliably holds mic access.
+
+        source: "mic" (this user) or "system" (other participants, via system
+        audio) — stored so the transcript can attribute both sides of the call.
+        """
+        from voxa.memory.engine import memory_engine
+        if not memory_engine._running:
+            return {"success": False, "ignored": True, "reason": "engine not running"}
+        data = await audio.read()
+        src = source if source in ("mic", "system") else "mic"
+        loop = asyncio.get_running_loop()
+        queued = await loop.run_in_executor(None, lambda: memory_engine.ingest_chunk(data, src))
+        return {"success": True, "queued": queued, "bytes": len(data), "source": src}
 
     @app.post("/api/memory/query")
     async def memory_query(req: dict):
@@ -761,6 +1009,200 @@ def create_api_server() -> FastAPI:
         deleted = memory_engine.cleanup(days)
         return {"success": True, "deleted_count": deleted, "retention_days": days}
 
+    # ── Memory Audio Clips + Storage ──────────────────────────────────────────
+
+    def _storage_info(store) -> dict:
+        """Build the storage/settings dict (shared by GET storage + POST settings)."""
+        stats = store.get_stats()
+        return {
+            "clips_count": stats.get("clips_count", 0),
+            "clips_size_mb": stats.get("clips_size_mb", 0.0),
+            "db_size_mb": stats.get("db_size_mb", 0.0),
+            "keep_audio": bool(getattr(config, "MEMORY_KEEP_AUDIO", True)),
+            "retention_days": int(getattr(config, "MEMORY_RETENTION_DAYS", 30)),
+        }
+
+    @app.get("/api/memory/clips")
+    async def memory_clips(limit: int = 50):
+        """List stored audio clips (segments with a clip file on disk), newest first."""
+        from voxa.memory.engine import memory_engine
+        clips = memory_engine.store.list_clips(limit=limit)
+        # Don't leak absolute disk paths to the client.
+        for c in clips:
+            c.pop("audio_path", None)
+        return {"clips": clips, "count": len(clips)}
+
+    @app.get("/api/memory/clip/{segment_id}")
+    async def memory_clip_audio(segment_id: int):
+        """Stream a single clip's raw WAV bytes."""
+        from voxa.memory.engine import memory_engine
+        path = memory_engine.store.get_clip_path(segment_id)
+        if not path:
+            raise HTTPException(status_code=404, detail="Clip not found")
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+        except OSError:
+            raise HTTPException(status_code=404, detail="Clip file missing")
+        return Response(content=data, media_type="audio/wav")
+
+    @app.delete("/api/memory/clip/{segment_id}")
+    async def memory_clip_delete(segment_id: int):
+        """Delete a clip's audio file AND its DB segment row + vector."""
+        from voxa.memory.engine import memory_engine
+        deleted = memory_engine.store.delete_segment(segment_id)
+        return {"success": deleted, "deleted": deleted}
+
+    @app.get("/api/memory/storage")
+    async def memory_storage():
+        """Clip/DB storage usage plus keep-audio and retention settings."""
+        from voxa.memory.engine import memory_engine
+        return _storage_info(memory_engine.store)
+
+    @app.post("/api/memory/settings")
+    async def memory_settings(req: dict):
+        """Update keep-audio / retention at runtime and persist them to ~/.voxa/.env."""
+        from voxa.config import persist_env_setting
+        from voxa.memory.engine import memory_engine
+        if "keep_audio" in req:
+            val = bool(req["keep_audio"])
+            config.MEMORY_KEEP_AUDIO = val
+            persist_env_setting("MEMORY_KEEP_AUDIO", "true" if val else "false")
+        if "retention_days" in req:
+            try:
+                days = int(req["retention_days"])
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="retention_days must be an integer")
+            config.MEMORY_RETENTION_DAYS = days
+            persist_env_setting("MEMORY_RETENTION_DAYS", days)
+        return _storage_info(memory_engine.store)
+
+    @app.post("/api/memory/clips/clear")
+    async def memory_clips_clear():
+        """Delete all clip FILES but keep transcripts (audio_path reset to '')."""
+        from voxa.memory.engine import memory_engine
+        deleted = memory_engine.store.clear_clips()
+        return {"success": True, "deleted": deleted}
+
+    @app.get("/api/memory/clip-sessions")
+    async def memory_clip_sessions(limit: int = 30):
+        """Group clips into session cards (AI title · date · platform), newest first."""
+        from voxa.memory.sessions import session_organizer
+        loop = asyncio.get_running_loop()
+        # Title generation may call the LLM — keep it off the event loop.
+        sessions = await loop.run_in_executor(
+            None, lambda: session_organizer.list_clip_sessions(limit)
+        )
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.delete("/api/memory/session/{session_id}")
+    async def memory_session_delete(session_id: str):
+        """Delete a session's clip FILES (transcripts stay searchable in Memory)."""
+        from voxa.memory.sessions import session_organizer
+        return session_organizer.delete_session(session_id)
+
+    # ── Meeting Detection (Granola-style auto-capture) ────────────────────────
+
+    @app.get("/api/meeting/status")
+    async def meeting_status():
+        """Whether meeting auto-detection is on and if a meeting is active."""
+        from voxa.memory.meeting_manager import meeting_manager
+        return meeting_manager.status
+
+    @app.post("/api/meeting/start")
+    async def meeting_start():
+        """Enable automatic meeting detection + capture."""
+        from voxa.memory.meeting_manager import meeting_manager
+        return meeting_manager.enable()
+
+    @app.post("/api/meeting/stop")
+    async def meeting_stop():
+        """Disable automatic meeting detection."""
+        from voxa.memory.meeting_manager import meeting_manager
+        return meeting_manager.disable()
+
+    @app.post("/api/meeting/confirm")
+    async def meeting_confirm(req: dict):
+        """Answer the 'record this meeting?' prompt. Body: {"record": true/false}."""
+        from voxa.memory.meeting_manager import meeting_manager
+        record = bool(req.get("record", False))
+        return meeting_manager.confirm(record)
+
+    @app.post("/api/meeting/pause")
+    async def meeting_pause():
+        """Pause the active meeting recording."""
+        from voxa.memory.meeting_manager import meeting_manager
+        return meeting_manager.pause_recording()
+
+    @app.post("/api/meeting/resume")
+    async def meeting_resume():
+        """Resume a paused meeting recording."""
+        from voxa.memory.meeting_manager import meeting_manager
+        return meeting_manager.resume_recording()
+
+    @app.post("/api/meeting/end")
+    async def meeting_end():
+        """End the current meeting recording now and save its notes."""
+        from voxa.memory.meeting_manager import meeting_manager
+        loop = asyncio.get_running_loop()
+        # Summarization can be slow — run off the event loop.
+        return await loop.run_in_executor(None, meeting_manager.end_recording)
+
+    @app.get("/api/meeting/list")
+    async def meeting_list(limit: int = 20):
+        """List recently captured meetings (newest first)."""
+        from voxa.memory.meeting_manager import meeting_manager
+        meetings = meeting_manager.list_meetings(limit)
+        return {"meetings": meetings, "count": len(meetings)}
+
+    @app.post("/api/meeting/insights/{session_id}")
+    async def meeting_regenerate_insights(session_id: str):
+        """(Re)generate structured notes (summary + action items + to-dos +
+        follow-ups) for a saved meeting and persist them into its record."""
+        from voxa.memory.meeting_manager import meeting_manager
+        loop = asyncio.get_running_loop()
+        # Extraction is an LLM call — run it off the event loop.
+        return await loop.run_in_executor(None, meeting_manager.regenerate_insights, session_id)
+
+    @app.post("/api/meeting/reminders/{session_id}")
+    async def meeting_export_reminders(session_id: str):
+        """Create macOS Reminders from a saved meeting's action items and to-dos."""
+        from voxa.memory.meeting_manager import meeting_manager
+        loop = asyncio.get_running_loop()
+        # AppleScript calls block — run off the event loop.
+        return await loop.run_in_executor(None, meeting_manager.export_to_reminders, session_id)
+
+    @app.post("/api/meeting/suggestion/confirm")
+    async def suggestion_confirm(req: dict):
+        """Answer a proactive 'add to calendar?' suggestion. Body: {suggestion_id, accept}."""
+        from voxa.memory.suggestions import suggestion_manager
+        suggestion_id = req.get("suggestion_id", "")
+        accept = bool(req.get("accept", False))
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, suggestion_manager.confirm, suggestion_id, accept)
+
+    @app.get("/api/meeting/suggestions")
+    async def suggestion_list():
+        """List currently-pending calendar suggestions awaiting the user's answer."""
+        from voxa.memory.suggestions import suggestion_manager
+        items = suggestion_manager.list_pending()
+        return {"suggestions": items, "count": len(items)}
+
+    @app.on_event("startup")
+    async def _meeting_startup():
+        """Capture the loop, wire the app-notify channel, and auto-enable if set."""
+        global _event_loop
+        _event_loop = asyncio.get_running_loop()
+        try:
+            from voxa.memory.meeting_manager import meeting_manager
+            meeting_manager.set_notifier(notify_clients_threadsafe)
+            from voxa.memory.suggestions import suggestion_manager
+            suggestion_manager.set_notifier(notify_clients_threadsafe)
+            if config.MEETING_AUTO_DETECT:
+                meeting_manager.enable()
+        except Exception as e:
+            log.warning("Meeting startup init failed: %s", e)
+
     # ── WebSocket for real-time status ────────────────────────────────────────
 
     @app.websocket("/ws/status")
@@ -772,6 +1214,12 @@ def create_api_server() -> FastAPI:
         - Execution progress
         - State changes
         """
+        if _bridge_token:
+            # Prefer the header (never logged); query param kept for compatibility.
+            supplied = websocket.headers.get("x-voxa-token") or websocket.query_params.get("token")
+            if supplied != _bridge_token:
+                await websocket.close(code=4401)
+                return
         await websocket.accept()
         _ws_connections.append(websocket)
         log.info("WebSocket client connected (%d total)", len(_ws_connections))
@@ -810,9 +1258,16 @@ def start_api_server(background: bool = False):
                 host=config.API_SERVER_HOST,
                 port=config.API_SERVER_PORT,
                 log_level="info",
+                access_log=False,  # request lines would log the ws bridge token
             )
         except ImportError:
             log.error("uvicorn not installed. Run: pip install uvicorn")
+        except OSError as e:
+            log.error(
+                "API server could not bind %s:%d — %s. "
+                "Another Voxa backend may already be running on that port.",
+                config.API_SERVER_HOST, config.API_SERVER_PORT, e,
+            )
         except Exception as e:
             log.error("API server failed to start: %s", e)
 

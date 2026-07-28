@@ -5,12 +5,45 @@ Loads settings from .env and provides typed access to all config values.
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Load .env from project root
-_project_root = Path(__file__).parent.parent
-load_dotenv(_project_root / ".env")
+# Load configuration from .env files. Search order (first match per key wins,
+# and real environment variables always take precedence over both):
+#   1. ~/.voxa/.env      — canonical location for the distributed/standalone app
+#   2. <project root>/.env — developer checkout
+# When frozen by PyInstaller there is no project root, so ~/.voxa/.env is what
+# the shipped app relies on (written by the first-run key prompt).
+if getattr(sys, "frozen", False):
+    # In a PyInstaller bundle __file__ points inside the temp extraction dir.
+    _project_root = Path(sys.executable).resolve().parent
+else:
+    _project_root = Path(__file__).parent.parent
+
+_user_env = Path.home() / ".voxa" / ".env"
+load_dotenv(_user_env)                 # user/distributed config first
+load_dotenv(_project_root / ".env")    # then dev checkout (won't override existing keys)
+
+# Writable base dir for logs/DB. The app bundle is read-only, so when frozen
+# (or when the project root isn't writable) fall back to ~/.voxa.
+def _writable_base() -> Path:
+    if getattr(sys, "frozen", False):
+        base = Path.home() / ".voxa"
+    else:
+        base = _project_root
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        test = base / ".write_test"
+        test.touch()
+        test.unlink()
+        return base
+    except Exception:
+        fallback = Path.home() / ".voxa"
+        fallback.mkdir(parents=True, exist_ok=True)
+        return fallback
+
+_data_dir = _writable_base()
 
 
 class Config:
@@ -51,11 +84,11 @@ class Config:
 
     # --- Logging ---
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    LOG_FILE: str = os.getenv("LOG_FILE", str(_project_root / "voxa.log"))
+    LOG_FILE: str = os.getenv("LOG_FILE", str(_data_dir / "voxa.log"))
 
     # --- Paths ---
     PROJECT_ROOT: Path = _project_root
-    DB_PATH: Path = _project_root / "voxa_history.db"
+    DB_PATH: Path = _data_dir / "voxa_history.db"
 
     # --- Ollama (local LLM fallback) ---
     OLLAMA_ENABLED: bool = os.getenv("OLLAMA_ENABLED", "false").lower() == "true"
@@ -81,6 +114,36 @@ class Config:
     MEMORY_AUTO_FILTER: bool = os.getenv("MEMORY_AUTO_FILTER", "true").lower() == "true"
     MEMORY_SYSTEM_AUDIO: bool = os.getenv("MEMORY_SYSTEM_AUDIO", "false").lower() == "true"
     MEMORY_STORAGE_PATH: Path = Path(os.getenv("MEMORY_STORAGE_PATH", str(Path.home() / ".voxa" / "memory")))
+    # Keep the audio clip for each meaningful memory chunk on disk (for playback).
+    MEMORY_KEEP_AUDIO: bool = os.getenv("MEMORY_KEEP_AUDIO", "true").lower() == "true"
+    # RMS threshold below which an incoming chunk is treated as silence and
+    # dropped before it costs a Whisper call (0..32767 on 16-bit PCM).
+    MEMORY_SILENCE_RMS: float = float(os.getenv("MEMORY_SILENCE_RMS", "180"))
+
+    # --- Integrations (Google / GitHub OAuth) ---
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    GITHUB_CLIENT_ID: str = os.getenv("GITHUB_CLIENT_ID", "")
+    GITHUB_CLIENT_SECRET: str = os.getenv("GITHUB_CLIENT_SECRET", "")
+
+    # --- Meeting Detection (Granola-style auto-capture) ---
+    MEETING_AUTO_DETECT: bool = os.getenv("MEETING_AUTO_DETECT", "false").lower() == "true"
+    MEETING_POLL_INTERVAL: float = float(os.getenv("MEETING_POLL_INTERVAL", "10"))
+    # Require a live microphone to start a browser meeting (filters stale tabs).
+    MEETING_REQUIRE_MIC: bool = os.getenv("MEETING_REQUIRE_MIC", "true").lower() == "true"
+    # If true, record detected meetings immediately. If false (default), prompt
+    # the user ("Record this meeting?") and only capture when they say yes.
+    MEETING_AUTO_RECORD: bool = os.getenv("MEETING_AUTO_RECORD", "false").lower() == "true"
+    # Capture meeting audio in the host app (Swift) and stream it to the backend,
+    # instead of the Python mic. The app reliably holds macOS mic permission, so
+    # this is what makes meeting notes actually fill in. Default on.
+    MEETING_EXTERNAL_AUDIO: bool = os.getenv("MEETING_EXTERNAL_AUDIO", "true").lower() == "true"
+    # Also capture system audio (the other participants) via ScreenCaptureKit, so
+    # meeting notes have BOTH sides. Needs Screen Recording permission. Default on.
+    MEETING_CAPTURE_SYSTEM_AUDIO: bool = os.getenv("MEETING_CAPTURE_SYSTEM_AUDIO", "true").lower() == "true"
+    # Proactively detect scheduling agreements in a conversation ("let's meet
+    # Friday at 3") and offer an "Add to calendar?" suggestion. Default on.
+    MEETING_SUGGESTIONS: bool = os.getenv("MEETING_SUGGESTIONS", "true").lower() == "true"
 
     @classmethod
     def validate(cls) -> list[str]:
@@ -89,6 +152,39 @@ class Config:
         if not cls.OPENAI_API_KEY or cls.OPENAI_API_KEY == "sk-your-key-here":
             errors.append("OPENAI_API_KEY is not set. Copy .env.example to .env and add your key.")
         return errors
+
+
+def persist_env_setting(key: str, value) -> bool:
+    """Upsert ``KEY=value`` into ~/.voxa/.env (the user/distributed config file).
+
+    Creates the file/dir if missing, replaces an existing ``KEY=`` line, or
+    appends a new one. Written with mode 0o600. Returns True on success, False
+    on any failure (defensive — never raises).
+    """
+    try:
+        path = _user_env
+        path.parent.mkdir(parents=True, exist_ok=True)
+        new_line = f"{key}={value}"
+        lines: list[str] = []
+        if path.exists():
+            lines = path.read_text().splitlines()
+        replaced = False
+        for i, existing in enumerate(lines):
+            stripped = existing.lstrip()
+            if not stripped.startswith("#") and stripped.startswith(f"{key}="):
+                lines[i] = new_line
+                replaced = True
+                break
+        if not replaced:
+            lines.append(new_line)
+        path.write_text("\n".join(lines) + "\n")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    except Exception:
+        return False
 
 
 # Singleton instance

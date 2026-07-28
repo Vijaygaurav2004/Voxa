@@ -47,6 +47,7 @@ class MemorySegment:
         timestamp: str | None = None,
         segment_id: int | None = None,
         embedding_id: int | None = None,
+        audio_path: str = "",
     ):
         self.segment_id = segment_id
         self.timestamp = timestamp or datetime.now().isoformat()
@@ -58,6 +59,7 @@ class MemorySegment:
         self.tags = tags
         self.session_id = session_id or str(uuid.uuid4())[:8]
         self.embedding_id = embedding_id
+        self.audio_path = audio_path
 
     def to_dict(self) -> dict:
         return {
@@ -71,6 +73,7 @@ class MemorySegment:
             "tags": self.tags,
             "session_id": self.session_id,
             "embedding_id": self.embedding_id,
+            "audio_path": self.audio_path,
         }
 
     @classmethod
@@ -86,6 +89,7 @@ class MemorySegment:
             tags=row.get("tags", ""),
             session_id=row.get("session_id", ""),
             embedding_id=row.get("embedding_id"),
+            audio_path=row.get("audio_path", ""),
         )
 
 
@@ -237,6 +241,9 @@ class MemoryStore:
 
     def __init__(self, db_path: Path = MEMORY_DB):
         self.db_path = str(db_path)
+        # Derive the clips dir from the db path parent so an injected db_path
+        # (e.g. tests using tmp_path) automatically isolates its audio clips.
+        self.clips_dir = Path(self.db_path).parent / "clips"
         self.vector_store = VectorStore()
         self._init_db()
 
@@ -260,6 +267,11 @@ class MemoryStore:
                     session_id TEXT DEFAULT ''
                 )
             """)
+
+            # Idempotent migration: add audio_path column for on-disk clips.
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(memory_segments)").fetchall()]
+            if "audio_path" not in cols:
+                conn.execute("ALTER TABLE memory_segments ADD COLUMN audio_path TEXT DEFAULT ''")
 
             # Indexes
             conn.execute("""
@@ -319,6 +331,7 @@ class MemoryStore:
         session_id: str = "",
         duration_secs: float = 0.0,
         embedding: list[float] | None = None,
+        audio_path: str = "",
     ) -> MemorySegment:
         """
         Store a new conversation segment.
@@ -332,6 +345,7 @@ class MemoryStore:
             session_id: Conversation session grouping ID.
             duration_secs: Duration of the audio segment.
             embedding: Optional pre-computed embedding vector.
+            audio_path: Full path to the stored audio clip (empty if not kept).
 
         Returns:
             The stored MemorySegment with its assigned ID.
@@ -342,10 +356,10 @@ class MemoryStore:
             cursor = conn.execute(
                 """INSERT INTO memory_segments
                    (timestamp, duration_secs, raw_transcript, filtered_text,
-                    summary, source, tags, session_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    summary, source, tags, session_id, audio_path)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (timestamp, duration_secs, raw_transcript, filtered_text,
-                 summary, source, tags, session_id),
+                 summary, source, tags, session_id, audio_path),
             )
             segment_id = cursor.lastrowid
 
@@ -370,11 +384,246 @@ class MemoryStore:
             tags=tags,
             session_id=session_id,
             embedding_id=embedding_id,
+            audio_path=audio_path,
         )
 
         log.info("💾 Stored memory segment #%d (session: %s, %.1fs)",
                  segment_id, session_id[:8], duration_secs)
         return segment
+
+    # ── Audio Clips ──────────────────────────────────────────────────────────
+
+    def save_clip(self, wav_bytes: bytes) -> str:
+        """Write WAV bytes to clips/<uuid>.wav; return the full path str, or '' on failure.
+
+        Does NOT touch the DB — the caller passes the returned path to
+        store_segment(audio_path=...).
+        """
+        try:
+            self.clips_dir.mkdir(parents=True, exist_ok=True)
+            path = self.clips_dir / f"{uuid.uuid4().hex}.wav"
+            path.write_bytes(wav_bytes)
+            return str(path)
+        except Exception as e:
+            log.warning("Failed to save audio clip: %s", e)
+            return ""
+
+    def list_clips(self, limit: int = 50) -> list[dict]:
+        """List segments that still have a clip file, newest first."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, timestamp, duration_secs, summary, source,
+                          session_id, audio_path
+                   FROM memory_segments
+                   WHERE audio_path != ''
+                   ORDER BY timestamp DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+        clips = []
+        for r in rows:
+            audio_path = r["audio_path"]
+            p = Path(audio_path)
+            size = p.stat().st_size if p.exists() else 0
+            clips.append({
+                "id": r["id"],
+                "timestamp": r["timestamp"],
+                "duration_secs": r["duration_secs"],
+                "summary": r["summary"],
+                "source": r["source"],
+                "session_id": r["session_id"],
+                "size_bytes": size,
+                "audio_path": audio_path,
+            })
+        return clips
+
+    def get_clip_path(self, segment_id: int) -> Optional[str]:
+        """Return the audio_path for a segment if its file exists, else None."""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT audio_path FROM memory_segments WHERE id = ?",
+                (segment_id,),
+            ).fetchone()
+        if not row or not row[0]:
+            return None
+        return row[0] if Path(row[0]).exists() else None
+
+    def delete_segment(self, segment_id: int) -> bool:
+        """Delete a segment: unlink its clip file, remove the DB row + its vector.
+
+        Returns True if a row was deleted, False if the id didn't exist.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute(
+                "SELECT audio_path FROM memory_segments WHERE id = ?",
+                (segment_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            audio_path = row[0]
+            # FTS trigger handles the FTS row cleanup.
+            conn.execute("DELETE FROM memory_segments WHERE id = ?", (segment_id,))
+
+        if audio_path:
+            try:
+                p = Path(audio_path)
+                if p.exists():
+                    p.unlink()
+            except Exception as e:
+                log.warning("Failed to unlink clip %s: %s", audio_path, e)
+
+        self.vector_store.remove(segment_id)
+        self.vector_store.flush()
+
+        log.info("🗑️ Deleted memory segment #%s", segment_id)
+        return True
+
+    def clear_clips(self) -> int:
+        """Unlink all clip FILES but keep transcripts (audio_path reset to '').
+
+        Returns the count of files removed.
+        """
+        removed = 0
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT audio_path FROM memory_segments WHERE audio_path != ''"
+            ).fetchall()
+            for (audio_path,) in rows:
+                if not audio_path:
+                    continue
+                try:
+                    p = Path(audio_path)
+                    if p.exists():
+                        p.unlink()
+                        removed += 1
+                except Exception as e:
+                    log.warning("Failed to unlink clip %s: %s", audio_path, e)
+            conn.execute("UPDATE memory_segments SET audio_path = '' WHERE audio_path != ''")
+
+        log.info("🧹 Cleared %d audio clips (transcripts kept)", removed)
+        return removed
+
+    def clips_stats(self) -> tuple[int, int]:
+        """Return (count of rows with an existing clip file, total bytes on disk)."""
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT audio_path FROM memory_segments WHERE audio_path != ''"
+            ).fetchall()
+        count = 0
+        total = 0
+        for (audio_path,) in rows:
+            p = Path(audio_path)
+            if p.exists():
+                count += 1
+                total += p.stat().st_size
+        return count, total
+
+    # ── Session-grouped Clips ──────────────────────────────────────────────────
+
+    def get_session_clips(self, session_id: str) -> list[dict]:
+        """Clips for one session that still have a file, oldest→newest.
+
+        Each dict is {id, timestamp, duration_secs, summary, source, session_id,
+        size_bytes} (size from the file on disk, 0 if missing). audio_path is
+        intentionally omitted — the server never leaks disk paths to the client.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT id, timestamp, duration_secs, summary, source,
+                          session_id, audio_path
+                   FROM memory_segments
+                   WHERE session_id = ? AND audio_path != ''
+                   ORDER BY timestamp ASC""",
+                (session_id,),
+            ).fetchall()
+
+        clips = []
+        for r in rows:
+            p = Path(r["audio_path"])
+            size = p.stat().st_size if p.exists() else 0
+            clips.append({
+                "id": r["id"],
+                "timestamp": r["timestamp"],
+                "duration_secs": r["duration_secs"],
+                "summary": r["summary"],
+                "source": r["source"],
+                "session_id": r["session_id"],
+                "size_bytes": size,
+            })
+        return clips
+
+    def list_sessions_with_clips(self, limit: int = 30) -> list[dict]:
+        """Group clip-bearing segments by session, newest session first.
+
+        Returns per session {session_id, clip_count, started_iso (MIN timestamp),
+        ended_iso (MAX timestamp), duration_secs (SUM), sources (DISTINCT source)}.
+        """
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """SELECT session_id,
+                          COUNT(*) as clip_count,
+                          MIN(timestamp) as started_iso,
+                          MAX(timestamp) as ended_iso,
+                          COALESCE(SUM(duration_secs), 0.0) as duration_secs,
+                          GROUP_CONCAT(DISTINCT source) as sources
+                   FROM memory_segments
+                   WHERE audio_path != ''
+                   GROUP BY session_id
+                   ORDER BY MAX(timestamp) DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
+
+        sessions = []
+        for r in rows:
+            sources_raw = r["sources"] or ""
+            sources = [s for s in sources_raw.split(",") if s]
+            sessions.append({
+                "session_id": r["session_id"],
+                "clip_count": r["clip_count"],
+                "started_iso": r["started_iso"],
+                "ended_iso": r["ended_iso"],
+                "duration_secs": r["duration_secs"],
+                "sources": sources,
+            })
+        return sessions
+
+    def clear_session_clips(self, session_id: str) -> int:
+        """Unlink one session's clip FILES but keep its transcripts.
+
+        Mirrors clear_clips() but scoped to a single session_id: removes the files
+        then resets their audio_path to ''. Returns the count of files removed.
+        """
+        removed = 0
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                "SELECT audio_path FROM memory_segments "
+                "WHERE session_id = ? AND audio_path != ''",
+                (session_id,),
+            ).fetchall()
+            for (audio_path,) in rows:
+                if not audio_path:
+                    continue
+                try:
+                    p = Path(audio_path)
+                    if p.exists():
+                        p.unlink()
+                        removed += 1
+                except Exception as e:
+                    log.warning("Failed to unlink clip %s: %s", audio_path, e)
+            conn.execute(
+                "UPDATE memory_segments SET audio_path = '' "
+                "WHERE session_id = ? AND audio_path != ''",
+                (session_id,),
+            )
+
+        log.info("🧹 Cleared %d clips for session %s (transcripts kept)",
+                 removed, (session_id or "")[:8])
+        return removed
 
     # ── Read Operations ──────────────────────────────────────────────────────
 
@@ -555,12 +804,13 @@ class MemoryStore:
         cutoff = (datetime.now() - timedelta(days=days)).isoformat()
 
         with sqlite3.connect(self.db_path) as conn:
-            # Get IDs to delete (for vector cleanup)
+            # Get IDs + clip paths to delete (for vector + clip-file cleanup)
             rows = conn.execute(
-                "SELECT id FROM memory_segments WHERE timestamp < ?",
+                "SELECT id, audio_path FROM memory_segments WHERE timestamp < ?",
                 (cutoff,),
             ).fetchall()
             ids_to_delete = [r[0] for r in rows]
+            clip_paths = [r[1] for r in rows if r[1]]
 
             if not ids_to_delete:
                 return 0
@@ -570,6 +820,15 @@ class MemoryStore:
                 "DELETE FROM memory_segments WHERE timestamp < ?",
                 (cutoff,),
             )
+
+        # Unlink clip files
+        for cp in clip_paths:
+            try:
+                p = Path(cp)
+                if p.exists():
+                    p.unlink()
+            except Exception as e:
+                log.warning("Failed to unlink clip %s: %s", cp, e)
 
         # Clean up vectors
         for sid in ids_to_delete:
@@ -586,6 +845,17 @@ class MemoryStore:
             conn.execute("DELETE FROM memory_segments")
             # Rebuild FTS index
             conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')")
+
+        # Remove all clip files so none are orphaned
+        try:
+            if self.clips_dir.exists():
+                for f in self.clips_dir.glob("*.wav"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.warning("Failed clearing clips dir: %s", e)
 
         # Clear vectors via public API
         self.vector_store.clear()
@@ -616,6 +886,8 @@ class MemoryStore:
             f.stat().st_size for f in VECTORS_DIR.glob("*") if f.is_file()
         ) if VECTORS_DIR.exists() else 0
 
+        clips_count, clips_bytes = self.clips_stats()
+
         return {
             "total_segments": total,
             "total_sessions": sessions,
@@ -625,4 +897,6 @@ class MemoryStore:
             "newest_segment": newest,
             "db_size_mb": round(db_size / (1024 * 1024), 2),
             "vectors_size_mb": round(vec_size / (1024 * 1024), 2),
+            "clips_count": clips_count,
+            "clips_size_mb": round(clips_bytes / (1024 * 1024), 2),
         }

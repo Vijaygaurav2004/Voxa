@@ -324,6 +324,27 @@ class Voxa:
                 self.overlay.set_state("done", "Complete!")
             return
 
+        # 0a. Natural-language mode CREATION — small LLM builds a mode from a
+        # plain English description (e.g. "create a work mode that opens VS Code
+        # and turns on do not disturb"). Checked before activation matching.
+        if mode_manager.is_create_mode_command(user_input):
+            print("\n🪄 Building a custom mode from your description...")
+            if self.overlay:
+                self.overlay.set_state("thinking", "Designing your mode...")
+            result = mode_manager.create_mode_from_description(user_input)
+            msg = result.get("message", "")
+            if result.get("success"):
+                print(f"\n   ✅ {msg}\n")
+                speak_confirmation(msg)
+                if self.overlay:
+                    self.overlay.set_state("done", msg)
+            else:
+                print(f"\n   ❌ {msg}\n")
+                speak_error(msg)
+                if self.overlay:
+                    self.overlay.set_state("error", msg)
+            return
+
         # 0b. Check custom modes (LLM-based activation)
         matched_mode = mode_manager.match_mode(user_input)
         if matched_mode:

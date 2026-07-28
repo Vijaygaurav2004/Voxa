@@ -54,6 +54,10 @@ class MemoryEngine:
         self._process_thread: Optional[threading.Thread] = None
         self._running = False
         self._paused = False
+        # When True, audio is streamed in from the host app (Swift) via
+        # ingest_chunk() instead of captured by the local Python mic. This is how
+        # the bundled app records meetings — the app holds mic permission reliably.
+        self._external_audio = False
 
         # Session tracking
         self._current_session_id: str = ""
@@ -70,14 +74,22 @@ class MemoryEngine:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    def start(self):
-        """Start the memory engine: ambient capture + background processing."""
+    def start(self, external_audio: bool = False):
+        """
+        Start the memory engine: background processing plus, unless
+        external_audio is set, local ambient capture.
+
+        Args:
+            external_audio: when True, don't open the local Python microphone —
+                the host app streams audio chunks in via ingest_chunk() instead.
+        """
         if self._running:
             log.warning("Memory engine already running")
             return
 
         self._running = True
         self._paused = False
+        self._external_audio = external_audio
         self._current_session_id = str(uuid.uuid4())[:8]
         self._last_speech_time = time.time()
 
@@ -89,19 +101,24 @@ class MemoryEngine:
         )
         self._process_thread.start()
 
-        # Start ambient capture
-        chunk_duration = getattr(config, "MEMORY_CHUNK_DURATION", 30)
-        enable_sys = getattr(config, "MEMORY_SYSTEM_AUDIO", False)
+        if external_audio:
+            self._capture = None
+            log.info("🧠 Memory engine started in EXTERNAL audio mode (session: %s) — host app streams audio",
+                     self._current_session_id)
+        else:
+            # Start local ambient capture
+            chunk_duration = getattr(config, "MEMORY_CHUNK_DURATION", 30)
+            enable_sys = getattr(config, "MEMORY_SYSTEM_AUDIO", False)
 
-        self._capture = AmbientCapture(
-            chunk_duration=chunk_duration,
-            on_speech_chunk=self._on_speech_chunk,
-            enable_system_audio=enable_sys,
-            vad_aggressiveness=2,
-        )
-        self._capture.start()
+            self._capture = AmbientCapture(
+                chunk_duration=chunk_duration,
+                on_speech_chunk=self._on_speech_chunk,
+                enable_system_audio=enable_sys,
+                vad_aggressiveness=2,
+            )
+            self._capture.start()
 
-        log.info("🧠 Memory engine started (session: %s)", self._current_session_id)
+            log.info("🧠 Memory engine started (session: %s)", self._current_session_id)
 
         # Auto-cleanup old segments on startup based on retention policy
         retention_days = getattr(config, "MEMORY_RETENTION_DAYS", 30)
@@ -192,6 +209,25 @@ class MemoryEngine:
         except queue.Full:
             log.warning("Memory processing queue full — dropping chunk")
 
+    def ingest_chunk(self, wav_bytes: bytes, source: str = "mic") -> bool:
+        """
+        Feed an externally-captured audio chunk (WAV bytes from the host app)
+        into the same pipeline as local capture. Used in external_audio mode.
+
+        Returns True if the chunk was queued, False if ignored (not running,
+        paused, or empty).
+        """
+        if not self._running or self._paused or not wav_bytes:
+            return False
+        # Silence gate: drop true silence before it costs a Whisper call. The
+        # external-audio path has no local VAD, so this is the only filter here.
+        from voxa.utils.audio_energy import is_silent
+        if is_silent(wav_bytes, getattr(config, "MEMORY_SILENCE_RMS", 180.0)):
+            log.debug("Ingest: dropping near-silent chunk")
+            return False
+        self._on_speech_chunk(wav_bytes, source)
+        return True
+
     # ── Background Processing ─────────────────────────────────────────────────
 
     def _process_loop(self):
@@ -232,10 +268,11 @@ class MemoryEngine:
         raw_transcript = self._transcribe(wav_bytes)
         if not raw_transcript or len(raw_transcript.strip()) < 5:
             log.debug("Transcription too short or empty — skipping")
+            log.debug("Skipping clip — non-meaningful/short chunk")
             return
 
         # 2. Filter with LLM (remove filler, keep substance)
-        filter_result = self._filter_transcript(raw_transcript)
+        filter_result = self._filter_transcript(raw_transcript, source=source)
         filtered_text = filter_result.get("filtered_text", raw_transcript)
         summary = filter_result.get("summary", "")
         tags = filter_result.get("tags", "")
@@ -244,6 +281,7 @@ class MemoryEngine:
         if not is_meaningful:
             log.debug("LLM marked transcript as non-meaningful — skipping: '%s'",
                       raw_transcript[:80])
+            log.debug("Skipping clip — non-meaningful/short chunk")
             return
 
         # 3. Generate embedding for semantic search
@@ -252,6 +290,11 @@ class MemoryEngine:
         # 4. Store in database
         # Use actual audio chunk duration, not processing time
         duration_secs = item.get("chunk_duration", 30.0)
+        # Persist the audio clip for meaningful chunks (silent/non-meaningful
+        # audio already returned above, so it's never written to disk).
+        audio_path = ""
+        if getattr(config, "MEMORY_KEEP_AUDIO", True):
+            audio_path = self.store.save_clip(wav_bytes)
         self.store.store_segment(
             raw_transcript=raw_transcript,
             filtered_text=filtered_text,
@@ -261,11 +304,20 @@ class MemoryEngine:
             session_id=session_id,
             duration_secs=duration_secs,
             embedding=embedding,
+            audio_path=audio_path,
         )
 
         elapsed = time.time() - start
         log.info("✅ Memory chunk processed in %.1fs: '%s' → '%s'",
                  elapsed, raw_transcript[:50], summary[:50])
+
+        # 5. Proactive suggestions — detect calendar intents in the conversation
+        if config.MEETING_SUGGESTIONS:
+            try:
+                from voxa.memory.suggestions import suggestion_manager
+                suggestion_manager.analyze_chunk(filtered_text, source=source, session_id=session_id)
+            except Exception as e:
+                log.debug("Suggestion analysis skipped: %s", e)
 
     # ── Transcription ─────────────────────────────────────────────────────────
 
@@ -293,7 +345,7 @@ class MemoryEngine:
 
     # ── LLM Filtering ────────────────────────────────────────────────────────
 
-    def _filter_transcript(self, raw_text: str) -> dict:
+    def _filter_transcript(self, raw_text: str, source: str = "mic") -> dict:
         """
         Use gpt-4o-mini to:
         1. Determine if the transcript is meaningful (vs. background noise / filler)
@@ -301,9 +353,26 @@ class MemoryEngine:
         3. Generate a one-line summary
         4. Auto-tag with topics
 
+        Args:
+            source: "mic" (the primary user's own voice) or "system" (the other
+                meeting participants, from system audio) — used to attribute turns.
+
         Returns:
             Dict with keys: is_meaningful, filtered_text, summary, tags
         """
+        if source == "mic":
+            source_hint = (
+                "This audio is the PRIMARY USER's own microphone — attribute these "
+                "turns to 'Me'."
+            )
+        elif source == "system":
+            source_hint = (
+                "This audio is the OTHER PARTICIPANTS (captured from system/speaker "
+                "output) — attribute turns to the participant's name if known, "
+                "otherwise 'Participant'. Do NOT label these as 'Me'."
+            )
+        else:
+            source_hint = ""
         try:
             client = self._get_client()
             response = client.chat.completions.create(
@@ -315,7 +384,8 @@ class MemoryEngine:
                             "You are a conversation filter and speaker diarization assistant. Given a raw transcript from ambient audio "
                             "containing turn-taking speech, identify/distinguish between different speakers based on style, tone, "
                             "context clues, and turn-taking.\n\n"
-                            "Rules:\n"
+                            + (source_hint + "\n\n" if source_hint else "")
+                            + "Rules:\n"
                             "- Mark as NOT meaningful: random noise, single-word utterances, music lyrics, background TV/radio, pure filler.\n"
                             "- Mark as meaningful: actual conversations, discussions, phone calls, meetings.\n"
                             "- For meaningful content, output the dialog in structured transcript format, attributing each turn "

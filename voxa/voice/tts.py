@@ -12,6 +12,7 @@ from hearing its own voice.
 from __future__ import annotations
 
 import os
+import queue as _queue
 import subprocess
 import tempfile
 import threading
@@ -66,6 +67,66 @@ def is_speaking() -> bool:
 
 _on_speaking_start: Optional[Callable] = None
 _on_speaking_end:   Optional[Callable] = None
+
+# ── Serial TTS queue ──────────────────────────────────────────────────────────
+# ALL speech goes through one worker thread so utterances never overlap, no
+# matter how many speak() calls arrive concurrently (e.g. a plan with multiple
+# speak actions, or a confirmation plus an auto-spoken result).
+_tts_queue: "_queue.Queue" = _queue.Queue()
+_worker_started = False
+_worker_lock = threading.Lock()
+
+
+def _ensure_tts_worker():
+    global _worker_started
+    with _worker_lock:
+        if _worker_started:
+            return
+        _worker_started = True
+        threading.Thread(target=_tts_worker_loop, daemon=True, name="tts-worker").start()
+
+
+def _enqueue_tts(text: str, done: Optional[threading.Event] = None):
+    """Queue an utterance. Pauses the wake listener when going idle→busy."""
+    if not text:
+        if done:
+            done.set()
+        return
+    _ensure_tts_worker()
+    global _active_count
+    with _count_lock:
+        was_idle = _active_count == 0
+        _active_count += 1
+    if was_idle and _on_speaking_start:
+        _on_speaking_start()
+    _tts_queue.put((text, done))
+
+
+def _tts_worker_loop():
+    """Play queued utterances strictly one at a time."""
+    global _active_count
+    while True:
+        text, done = _tts_queue.get()
+        try:
+            if text:
+                _speak_best(text)
+        except Exception as e:
+            log.warning("TTS playback error: %s", e)
+        finally:
+            with _count_lock:
+                _active_count = max(0, _active_count - 1)
+                idle = _active_count == 0
+            if idle:
+                # Let the audio tail finish before re-enabling the mic, and
+                # re-check in case another utterance was queued meanwhile.
+                time.sleep(0.5)
+                with _count_lock:
+                    still_idle = _active_count == 0
+                if still_idle and _on_speaking_end:
+                    _on_speaking_end()
+            if done:
+                done.set()
+            _tts_queue.task_done()
 
 _el_client    = None
 _el_checked   = False
@@ -122,50 +183,29 @@ def set_speaking_hooks(on_start: Callable, on_end: Callable):
 
 def speak(text: str, blocking: bool = True):
     """
-    Speak text aloud using the best available TTS engine.
-    Mutes the wake listener before speaking and resumes after.
+    Speak text aloud using the best available TTS engine, serialized through the
+    TTS queue so it never overlaps other speech. Mutes the wake listener while
+    speaking. If blocking, waits until this utterance has finished playing.
     """
     if not text:
         return
 
     log.info("🔊 Speaking: \"%s\"", text[:100])
 
-    def _run():
-        _increment_active()
-        if _on_speaking_start:
-            _on_speaking_start()
-        try:
-            _speak_best(text)
-        finally:
-            time.sleep(0.6)
-            if _on_speaking_end:
-                _on_speaking_end()
-            _decrement_active()
-
     if blocking:
-        _run()
+        done = threading.Event()
+        _enqueue_tts(text, done)
+        done.wait(timeout=30)
     else:
-        threading.Thread(target=_run, daemon=True, name="tts").start()
+        _enqueue_tts(text)
 
 
 def speak_confirmation(text: str):
-    """Non-blocking speak — mutes wake listener before spawning thread."""
+    """Non-blocking speak — queued so it plays after any in-flight speech."""
     if not text:
         return
-    _increment_active()
-    if _on_speaking_start:
-        _on_speaking_start()
-
-    def _run():
-        try:
-            _speak_best(text)
-        finally:
-            time.sleep(0.6)
-            if _on_speaking_end:
-                _on_speaking_end()
-            _decrement_active()
-
-    threading.Thread(target=_run, daemon=True, name="tts-confirm").start()
+    log.info("🔊 Speaking: \"%s\"", text[:100])
+    _enqueue_tts(text)
 
 
 def speak_error(text: str):
@@ -174,8 +214,19 @@ def speak_error(text: str):
 
 
 def stop_speaking():
-    """Kill any active TTS playback immediately."""
-    global _current_proc
+    """Kill any active TTS playback immediately and clear the queue."""
+    global _current_proc, _active_count
+    # Drain any pending utterances (release blocked callers waiting on them).
+    try:
+        while True:
+            _, done = _tts_queue.get_nowait()
+            if done:
+                done.set()
+            _tts_queue.task_done()
+    except _queue.Empty:
+        pass
+    with _count_lock:
+        _active_count = 0
     try:
         subprocess.run(["killall", "say"],    capture_output=True)
         subprocess.run(["killall", "afplay"], capture_output=True)
@@ -185,6 +236,8 @@ def stop_speaking():
                 _current_proc = None
     except Exception:
         pass
+    if _on_speaking_end:
+        _on_speaking_end()
 
 
 def speak_and_listen(text: str, on_done: callable):
