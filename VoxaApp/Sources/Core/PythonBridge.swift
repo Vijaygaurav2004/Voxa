@@ -660,6 +660,61 @@ actor PythonBridge {
         return try await post("/api/meeting/reminders/\(sessionId)", body: [:])
     }
 
+    // MARK: - To-dos (captured from meetings and ordinary conversation)
+
+    /// One captured commitment.
+    struct TodoRecord: Decodable, Identifiable {
+        let id: String
+        let task: String
+        let owner: String
+        let due: String
+        let source: String        // conversation | meeting | manual
+        let context: String
+        let created_iso: String
+        let done: Bool
+        let exported: Bool
+    }
+
+    struct TodosResponse: Decodable {
+        let todos: [TodoRecord]
+        let count: Int
+        let open_count: Int
+    }
+
+    struct TodoMutationResponse: Decodable {
+        let success: Bool
+        let message: String?
+    }
+
+    func getTodos(includeDone: Bool = true) async throws -> [TodoRecord] {
+        let res: TodosResponse = try await get("/api/todos?include_done=\(includeDone)")
+        return res.todos
+    }
+
+    @discardableResult
+    func addTodo(task: String, owner: String = "", due: String = "") async throws -> TodoMutationResponse {
+        return try await post("/api/todos", body: ["task": task, "owner": owner, "due": due])
+    }
+
+    @discardableResult
+    func setTodoDone(id: String, done: Bool) async throws -> TodoMutationResponse {
+        return try await post("/api/todos/\(id)/done", body: ["done": done])
+    }
+
+    @discardableResult
+    func deleteTodo(id: String) async throws -> TodoMutationResponse {
+        return try await delete("/api/todos/\(id)")
+    }
+
+    @discardableResult
+    func clearCompletedTodos() async throws -> TodoMutationResponse {
+        return try await post("/api/todos/clear-completed", body: [:])
+    }
+
+    func exportTodosToReminders() async throws -> RemindersExportResponse {
+        return try await post("/api/todos/export-reminders", body: [:])
+    }
+
     // MARK: - Integrations (Google / GitHub connections)
 
     struct IntegrationProvider: Codable, Identifiable {

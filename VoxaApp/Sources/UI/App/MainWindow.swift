@@ -3,11 +3,13 @@ import SwiftUI
 // MARK: - Sidebar sections
 
 enum AppSection: String, CaseIterable, Identifiable {
-    case home, modes, meetings, memory, accounts, settings
+    case home, launcher, todos, modes, meetings, memory, accounts, settings
     var id: String { rawValue }
     var title: String {
         switch self {
         case .home: return "Home"
+        case .launcher: return "Launcher"
+        case .todos: return "To-dos"
         case .modes: return "Modes"
         case .meetings: return "Meetings"
         case .memory: return "Memory"
@@ -18,6 +20,8 @@ enum AppSection: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .home: return "house"
+        case .launcher: return "circle.hexagongrid"
+        case .todos: return "checklist"
         case .modes: return "slider.horizontal.3"
         case .meetings: return "person.2.wave.2"
         case .memory: return "brain"
@@ -47,6 +51,8 @@ struct MainWindow: View {
     @ViewBuilder private var detail: some View {
         switch section {
         case .home:     HomePage()
+        case .launcher: LauncherPage()
+        case .todos:    TodosPage()
         case .modes:    ModesPage()
         case .meetings: MeetingsPage()
         case .memory:   MemoryPage()

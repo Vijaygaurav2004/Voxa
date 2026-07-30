@@ -5,6 +5,8 @@ import AppKit
 struct MenuBarView: View {
     @EnvironmentObject var engine: VoxaEngine
     @EnvironmentObject var state: VoxaState
+    @ObservedObject private var perch = PerchSettings.shared
+    @ObservedObject private var perchManager = PerchManager.shared
 
     @State private var commandText: String = ""
     @State private var showingSettings: Bool = false
@@ -60,14 +62,6 @@ struct MenuBarView: View {
         }
     }
 
-    // Shared brand accent used across the app (purple → blue).
-    private var brandGradient: LinearGradient {
-        LinearGradient(
-            colors: [Color(hue: 0.75, saturation: 0.7, brightness: 0.95), .blue],
-            startPoint: .leading, endPoint: .trailing
-        )
-    }
-
     // MARK: - Main View
     var mainView: some View {
         VStack(spacing: 12) {
@@ -89,31 +83,31 @@ struct MenuBarView: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            // Same mark as the main window's sidebar.
             ZStack {
-                Circle().fill(brandGradient).frame(width: 30, height: 30)
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .fill(Color.primary).frame(width: 30, height: 30)
                 Image(systemName: "waveform")
                     .font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white)
+                    .foregroundStyle(Color(NSColor.windowBackgroundColor))
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text("Voxa")
-                    .font(.system(size: 16, weight: .bold))
+                Text("Voxa").font(.system(size: 16, weight: .bold))
                 Text(state.isBackendReady ? "Ready" : "Starting up…")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 10)).foregroundStyle(Theme.subtle)
             }
             Spacer()
             HStack(spacing: 5) {
                 Circle()
-                    .fill(state.isBackendReady ? Color.green : Color.orange)
+                    .fill(state.isBackendReady ? Color.primary : Theme.faint)
                     .frame(width: 6, height: 6)
                 Text(state.isBackendReady ? "Online" : "Offline")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.subtle)
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(Capsule().fill(Color.primary.opacity(0.06)))
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(Capsule().fill(Theme.card))
+            .overlay(Capsule().strokeBorder(Theme.stroke, lineWidth: 1))
         }
         .padding(.horizontal)
     }
@@ -123,18 +117,15 @@ struct MenuBarView: View {
     private var statusRow: some View {
         HStack(spacing: 8) {
             Circle()
-                .fill(state.stateColor)
+                .fill(state.pipelineState == .idle ? Theme.faint : Color.primary)
                 .frame(width: 8, height: 8)
-                .shadow(color: state.stateColor.opacity(0.6), radius: 4)
             Text(state.statusMessage)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .font(.system(size: 12)).foregroundStyle(Theme.subtle).lineLimit(1)
             Spacer()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(state.stateColor.opacity(0.08)))
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
         .padding(.horizontal)
     }
 
@@ -149,31 +140,29 @@ struct MenuBarView: View {
                     .onSubmit(submitCommand)
                 if !commandText.isEmpty {
                     Button { commandText = "" } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundStyle(.tertiary)
+                        Image(systemName: "xmark.circle.fill").foregroundStyle(Theme.faint)
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(Capsule().fill(Color.primary.opacity(0.06)))
+            .padding(.horizontal, 12).padding(.vertical, 9)
+            .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
 
             Button(action: submitCommand) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
+                    .foregroundStyle(commandText.trimmed.isEmpty
+                                     ? AnyShapeStyle(Theme.faint)
+                                     : AnyShapeStyle(Color(NSColor.windowBackgroundColor)))
+                    .frame(width: 34, height: 34)
                     .background(
-                        Circle().fill(
-                            commandText.trimmingCharacters(in: .whitespaces).isEmpty
-                                ? AnyShapeStyle(Color.gray.opacity(0.3))
-                                : AnyShapeStyle(brandGradient)
-                        )
+                        RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                            .fill(commandText.trimmed.isEmpty ? Theme.card : Color.primary)
                     )
             }
             .buttonStyle(.plain)
-            .disabled(commandText.trimmingCharacters(in: .whitespaces).isEmpty)
+            .disabled(commandText.trimmed.isEmpty)
         }
         .padding(.horizontal)
     }
@@ -186,16 +175,14 @@ struct MenuBarView: View {
         } label: {
             HStack(spacing: 6) {
                 Image(systemName: "mic.fill")
-                Text("Tap to speak")
-                    .fontWeight(.medium)
-                Text("· ⌘⇧V")
-                    .foregroundStyle(.white.opacity(0.7))
+                Text("Tap to speak").fontWeight(.semibold)
+                Text("· ⌘⇧V").foregroundStyle(Color(NSColor.windowBackgroundColor).opacity(0.6))
             }
             .font(.system(size: 12))
-            .foregroundStyle(.white)
+            .foregroundStyle(Color(NSColor.windowBackgroundColor))
             .frame(maxWidth: .infinity)
-            .padding(.vertical, 9)
-            .background(Capsule().fill(brandGradient))
+            .padding(.vertical, 10)
+            .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Color.primary))
         }
         .buttonStyle(.plain)
         .padding(.horizontal)
@@ -205,10 +192,7 @@ struct MenuBarView: View {
 
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("RECENT")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal)
+            SectionLabel(text: "Recent").padding(.horizontal)
 
             ForEach(state.recentCommands.prefix(4), id: \.self) { command in
                 Button {
@@ -216,20 +200,15 @@ struct MenuBarView: View {
                 } label: {
                     HStack(spacing: 8) {
                         Image(systemName: "arrow.counterclockwise")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
+                            .font(.system(size: 10)).foregroundStyle(Theme.subtle)
                         Text(command)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .foregroundStyle(.primary)
+                            .font(.system(size: 12)).lineLimit(1).foregroundStyle(Theme.text)
                         Spacer()
                         Image(systemName: "arrow.up.backward")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
+                            .font(.system(size: 9)).foregroundStyle(Theme.faint)
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -244,14 +223,12 @@ struct MenuBarView: View {
         VStack(spacing: 8) {
             toggleCard(
                 icon: "sparkles.rectangle.stack",
-                tint: .indigo,
                 title: "Notch Halo",
                 subtitle: "Wrap the animation around the notch",
                 isOn: $state.useNotchHalo
             )
             toggleCard(
                 icon: meetingInProgress ? "person.2.wave.2.fill" : "calendar.badge.clock",
-                tint: .green,
                 title: "Meeting Notes",
                 subtitle: meetingInProgress
                     ? (meetingPaused ? "In a \(meetingPlatform) meeting — paused" : "Recording \(meetingPlatform) meeting")
@@ -264,15 +241,14 @@ struct MenuBarView: View {
             }
             toggleCard(
                 icon: memoryActive ? "brain.head.profile" : "brain",
-                tint: .purple,
                 title: "Memory",
                 subtitle: memoryActive ? "Listening for recall" : "Ambient recall is off",
                 isOn: Binding(get: { memoryActive }, set: { toggleMemory($0) }),
                 loading: memoryLoading
             )
+            perchCard
             toggleCard(
                 icon: "bubble.left.and.bubble.right.fill",
-                tint: .blue,
                 title: "Chat Ball",
                 subtitle: "Floating chat button on screen",
                 isOn: Binding(
@@ -287,6 +263,43 @@ struct MenuBarView: View {
         .padding(.horizontal)
     }
 
+    /// The perch gets its own card because it needs BOTH an on/off switch and a
+    /// way to open it by hand. Hover-reveal depends on a global mouse monitor,
+    /// which silently does nothing without Accessibility permission — without
+    /// this button there would be no way to open the perch at all on a Mac where
+    /// that was denied, or on one with no notch to point at.
+    private var perchCard: some View {
+        HStack(spacing: 10) {
+            Button {
+                if perch.enabled { perchManager.toggle() }
+            } label: {
+                ZStack {
+                    RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                        .fill(Theme.card).frame(width: 30, height: 30)
+                    Image(systemName: "macbook.gen2")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(perch.enabled ? Theme.text : Theme.faint)
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(!perch.enabled)
+            .help(perch.enabled ? "Open or close the perch" : "Turn the perch on first")
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Notch Perch").font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text)
+                Text(perch.enabled
+                     ? (perchManager.isOpen ? "Open — click the icon to close" : "Point at the notch, or click the icon")
+                     : "Shelf that drops from the notch")
+                    .font(.system(size: 10)).foregroundStyle(Theme.subtle).lineLimit(1)
+            }
+            Spacer(minLength: 6)
+            MonoToggle(isOn: $perch.enabled)
+        }
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
+    }
+
     /// Pause / Resume + End controls, shown while a meeting is being recorded.
     private var meetingControls: some View {
         HStack(spacing: 8) {
@@ -298,10 +311,11 @@ struct MenuBarView: View {
                     Text(meetingPaused ? "Resume" : "Pause")
                 }
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(meetingPaused ? .green : .primary)
+                .foregroundStyle(Theme.text)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 6)
-                .background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+                .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
             }
             .buttonStyle(.plain)
 
@@ -324,7 +338,6 @@ struct MenuBarView: View {
 
     private func toggleCard(
         icon: String,
-        tint: Color,
         title: String,
         subtitle: String,
         isOn: Binding<Bool>,
@@ -332,33 +345,34 @@ struct MenuBarView: View {
     ) -> some View {
         HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(tint.opacity(0.15)).frame(width: 30, height: 30)
-                Image(systemName: icon).font(.system(size: 13, weight: .medium)).foregroundStyle(tint)
+                RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                    .fill(Theme.card).frame(width: 30, height: 30)
+                Image(systemName: icon)
+                    .font(.system(size: 13, weight: .medium)).foregroundStyle(Theme.text)
             }
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 12, weight: .medium))
-                Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(Theme.text)
+                Text(subtitle).font(.system(size: 10)).foregroundStyle(Theme.subtle).lineLimit(1)
             }
-            Spacer()
+            Spacer(minLength: 6)
             if loading {
                 ProgressView().controlSize(.small)
             } else {
-                Toggle("", isOn: isOn)
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                    .labelsHidden()
+                MonoToggle(isOn: isOn)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.03)))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06), lineWidth: 1))
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .background(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).fill(Theme.card))
+        .overlay(RoundedRectangle(cornerRadius: Theme.radius, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
     }
 
     // MARK: - Footer
 
     private var footer: some View {
         HStack(spacing: 8) {
+            footerButton(icon: "circle.hexagongrid", title: "Wheel") {
+                RadialLauncher.shared.show()
+            }
             footerButton(icon: "slider.horizontal.3", title: "Modes") {
                 showingSettings = true
                 loadModes()
@@ -379,7 +393,8 @@ struct MenuBarView: View {
                 .foregroundStyle(.red)
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)
-                .background(RoundedRectangle(cornerRadius: 8).fill(Color.red.opacity(0.08)))
+                .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
+                .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
             }
             .buttonStyle(.plain)
         }
@@ -393,9 +408,11 @@ struct MenuBarView: View {
                 Text(title)
             }
             .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Theme.text)
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.06)))
+            .background(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).fill(Theme.card))
+            .overlay(RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous).strokeBorder(Theme.stroke, lineWidth: 1))
         }
         .buttonStyle(.plain)
     }
@@ -457,7 +474,7 @@ struct MenuBarView: View {
             HStack(spacing: 6) {
                 Image(systemName: "person.2.fill")
                     .font(.caption)
-                    .foregroundStyle(.green)
+                    .foregroundStyle(Theme.subtle)
                 Text(m.platform ?? "Meeting")
                     .font(.subheadline).bold()
                 Spacer()
@@ -683,7 +700,7 @@ struct MenuBarView: View {
                                                 startEditing(mode)
                                             } label: {
                                                 Image(systemName: "pencil")
-                                                    .foregroundStyle(.blue)
+                                                    .foregroundStyle(Theme.subtle)
                                             }
                                             .buttonStyle(.plain)
                                             
@@ -800,8 +817,8 @@ struct MenuBarView: View {
         }
         .padding(10)
         .background(
-            RoundedRectangle(cornerRadius: 8)
-                .fill(Color.purple.opacity(0.06))
+            RoundedRectangle(cornerRadius: Theme.radiusSmall, style: .continuous)
+                .fill(Theme.card)
         )
         .overlay(
             RoundedRectangle(cornerRadius: 8)

@@ -62,6 +62,23 @@ struct SettingsPage: View {
             // Appearance / behaviour
             group("Interface") {
                 VStack(spacing: 14) {
+                    SettingRow(icon: "circle.lefthalf.filled", title: "Appearance", subtitle: "Light, dark, or follow macOS") {
+                        AppearancePicker()
+                    }
+                    Divider().overlay(Theme.stroke)
+                    SettingRow(icon: "macbook.gen2", title: "Notch Perch",
+                               subtitle: "Shelf that drops from the notch — music, notes, clipboard, timer, files") {
+                        HStack(spacing: 8) {
+                            Button("Open") { PerchManager.shared.open() }
+                                .buttonStyle(GhostButtonStyle()).frame(width: 74)
+                                .disabled(!PerchSettings.shared.enabled)
+                            MonoToggle(isOn: Binding(
+                                get: { PerchSettings.shared.enabled },
+                                set: { PerchSettings.shared.enabled = $0 }
+                            ))
+                        }
+                    }
+                    Divider().overlay(Theme.stroke)
                     SettingRow(icon: "sparkles.rectangle.stack", title: "Notch Halo", subtitle: "Wrap the animation around the notch") {
                         MonoToggle(isOn: $state.useNotchHalo)
                     }

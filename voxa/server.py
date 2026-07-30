@@ -1181,6 +1181,69 @@ def create_api_server() -> FastAPI:
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, suggestion_manager.confirm, suggestion_id, accept)
 
+    # ── To-dos (captured from meetings and ordinary conversation) ─────────────
+
+    @app.get("/api/todos")
+    async def todos_list(include_done: bool = True, limit: int = 200):
+        """The running to-do list — open items first, newest first."""
+        from voxa.memory.todos import todo_manager
+        items = todo_manager.list_todos(include_done=include_done, limit=limit)
+        return {
+            "todos": items,
+            "count": len(items),
+            "open_count": sum(1 for t in items if not t.get("done")),
+        }
+
+    @app.post("/api/todos")
+    async def todos_add(req: dict):
+        """Add a to-do by hand. Body: {task, owner?, due?}."""
+        from voxa.memory.todos import todo_manager
+        task = (req or {}).get("task", "")
+        if not str(task).strip():
+            raise HTTPException(status_code=400, detail="Missing 'task'")
+        record = todo_manager.add(
+            task=task,
+            owner=(req or {}).get("owner", ""),
+            due=(req or {}).get("due", ""),
+            source="manual",
+        )
+        if record is None:
+            return {"success": False, "message": "That's already on your list."}
+        return {"success": True, "todo": record}
+
+    @app.post("/api/todos/{todo_id}/done")
+    async def todos_done(todo_id: str, req: dict = None):
+        """Tick a to-do off (or un-tick it with {"done": false})."""
+        from voxa.memory.todos import todo_manager
+        done = bool((req or {}).get("done", True))
+        ok = todo_manager.set_done(todo_id, done)
+        if not ok:
+            raise HTTPException(status_code=404, detail="No such to-do")
+        return {"success": True, "done": done}
+
+    @app.delete("/api/todos/{todo_id}")
+    async def todos_delete(todo_id: str):
+        """Remove a to-do entirely."""
+        from voxa.memory.todos import todo_manager
+        ok = todo_manager.delete(todo_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="No such to-do")
+        return {"success": True}
+
+    @app.post("/api/todos/clear-completed")
+    async def todos_clear_completed():
+        """Drop everything already ticked off."""
+        from voxa.memory.todos import todo_manager
+        return {"success": True, "removed": todo_manager.clear_completed()}
+
+    @app.post("/api/todos/export-reminders")
+    async def todos_export_reminders():
+        """Push not-yet-exported to-dos into the macOS Reminders app."""
+        from voxa.memory.todos import todo_manager
+        loop = asyncio.get_running_loop()
+        # AppleScript blocks — keep it off the event loop.
+        return await loop.run_in_executor(None, todo_manager.export_to_reminders)
+
     @app.get("/api/meeting/suggestions")
     async def suggestion_list():
         """List currently-pending calendar suggestions awaiting the user's answer."""
@@ -1198,6 +1261,8 @@ def create_api_server() -> FastAPI:
             meeting_manager.set_notifier(notify_clients_threadsafe)
             from voxa.memory.suggestions import suggestion_manager
             suggestion_manager.set_notifier(notify_clients_threadsafe)
+            from voxa.memory.todos import todo_manager
+            todo_manager.set_notifier(notify_clients_threadsafe)
             if config.MEETING_AUTO_DETECT:
                 meeting_manager.enable()
         except Exception as e:

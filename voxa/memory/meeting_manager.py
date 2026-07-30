@@ -295,6 +295,17 @@ class MeetingManager:
             **notes,
         }
         self._append_meeting(record)
+
+        # Fold the meeting's commitments into the single running to-do list, so
+        # the Meetings page and the Todos page can never disagree.
+        try:
+            from voxa.memory.todos import todo_manager
+            todo_manager.ingest_meeting_notes(
+                notes, session_id=session_id, platform=record.get("platform", "")
+            )
+        except Exception as e:
+            log.warning("Todo ingest from meeting failed: %s", e)
+
         log.info("📝 Meeting saved: %s (%.0fs)", record["platform"], record["duration_secs"])
         self._notify("meeting_ended", {"recorded": True, "platform": record["platform"]})
         return True

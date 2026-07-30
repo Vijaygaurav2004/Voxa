@@ -18,5 +18,11 @@
     <string>Voxa requires speech recognition to transcribe voice commands.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Voxa requires microphone access to record voice commands.</string>
+    <key>NSCalendarsUsageDescription</key>
+    <string>Voxa shows today's events in the notch perch and can read your schedule when you ask.</string>
+    <key>NSCalendarsFullAccessUsageDescription</key>
+    <string>Voxa shows today's events in the notch perch and can read your schedule when you ask.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Voxa controls apps on your behalf — opening them, managing Chrome tabs, sending messages, and reading what's playing.</string>
 </dict>
 </plist>

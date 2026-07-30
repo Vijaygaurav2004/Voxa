@@ -145,6 +145,12 @@ class Config:
     # Friday at 3") and offer an "Add to calendar?" suggestion. Default on.
     MEETING_SUGGESTIONS: bool = os.getenv("MEETING_SUGGESTIONS", "true").lower() == "true"
 
+    # --- To-dos ---
+    # Pull commitments ("I'll send the deck tonight") out of meetings AND ordinary
+    # conversation into a running to-do list. A keyword gate runs first, so only
+    # chunks that sound like a commitment ever cost an LLM call. Default on.
+    TODO_AUTO_CAPTURE: bool = os.getenv("TODO_AUTO_CAPTURE", "true").lower() == "true"
+
     @classmethod
     def validate(cls) -> list[str]:
         """Validate critical configuration. Returns list of errors."""

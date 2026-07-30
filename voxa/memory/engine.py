@@ -319,6 +319,16 @@ class MemoryEngine:
             except Exception as e:
                 log.debug("Suggestion analysis skipped: %s", e)
 
+        # 6. To-do capture — pull commitments out of ordinary conversation, not
+        # just meetings. Gated on a cheap keyword check inside analyze_chunk, so
+        # idle chatter never reaches the model.
+        if getattr(config, "TODO_AUTO_CAPTURE", True):
+            try:
+                from voxa.memory.todos import todo_manager
+                todo_manager.analyze_chunk(filtered_text, source=source, session_id=session_id)
+            except Exception as e:
+                log.debug("Todo analysis skipped: %s", e)
+
     # ── Transcription ─────────────────────────────────────────────────────────
 
     def _transcribe(self, wav_bytes: bytes) -> Optional[str]:

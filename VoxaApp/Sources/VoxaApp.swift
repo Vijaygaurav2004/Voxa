@@ -108,6 +108,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var stateObserver: Any?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Apply the saved light/dark preference before any window is shown.
+        AppearanceManager.shared.apply()
+
         let state = VoxaState.shared
         orbPanel = VoxaOrbPanel(state: state)
 
@@ -139,9 +142,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Show the floating chat ball
         FloatingBallManager.shared.show()
+
+        // Bind the radial launcher's global shortcut (no-op while it's toggled off)
+        RadialLauncher.shared.start()
+
+        // Hang the notch perch off the top of the screen (no-op while toggled off)
+        PerchManager.shared.start()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        PerchManager.shared.stop()
+        RadialLauncher.shared.stop()
         VoxaEngine.shared.stop()
     }
 }
